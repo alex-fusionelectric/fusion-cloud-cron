@@ -1,0 +1,21 @@
+# Local secrets -- service keys never go to git. The script reads
+# SUPABASE_SERVICE_KEY from env (GitHub Actions secret) or from
+# fusion-bid-list/supabase-service-key.txt for local runs; the cloud
+# repo doesn't need either checked in.
+*.key
+*service-key*.txt
+.env
+.env.*
+
+# Python noise
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE noise
+.vscode/
+.idea/
+
+# Local validation output
+cloud-bids-data.json
+*.tmp

@@ -1,0 +1,60 @@
+name: Sync BID LIST to Supabase
+
+# Runs every 5 minutes, downloads BID LIST.xlsm from a SharePoint share
+# link, parses it (same logic as fusion-pm panel/scripts/sync-bid-list.py
+# does on the local PC), and writes all rows to public.bids_cloud in
+# Supabase. Goal: take Alex's PC out of the data path entirely.
+#
+# This workflow is intentionally narrow:
+#   - One xlsm in, one Supabase table out.
+#   - No diff vs existing pipeline (validated locally before cutover).
+#   - Failures email the repo owner via GitHub's standard Action-failure path.
+#
+# Cost: ~30s per run = 4 hr/month of Actions minutes, well inside the
+# 2k free quota even on private repos.
+
+on:
+  schedule:
+    # GitHub cron is UTC. */5 = every 5 min. Leave 0 9-23 if you want to
+    # quiet it overnight, but the load is negligible so 24/7 is fine.
+    - cron: "*/5 * * * *"
+  # Manual trigger: visible in the Actions tab as a "Run workflow" button.
+  # Useful for forcing a refresh after editing BID LIST.xlsm without
+  # waiting up to 5 min.
+  workflow_dispatch: {}
+
+# Don't pile up if a run takes longer than the 5-min cadence (network
+# burp, etc.). Cancel any older queued copy of the same workflow.
+concurrency:
+  group: sync-bid-list
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8  # well above the typical 30s; catches a hung run.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run cloud parser -> Supabase
+        env:
+          # Both injected from repo secrets (Settings -> Secrets -> Actions).
+          # BID_LIST_URL: the SharePoint "Anyone with the link" share URL
+          #   for BID LIST.xlsm. The script appends &download=1 itself.
+          # SUPABASE_SERVICE_KEY: the service_role key from your Supabase
+          #   project (Project Settings -> API -> service_role). It MUST
+          #   be the service key, not anon -- anon can't write to
+          #   bids_cloud per RLS policy.
+          BID_LIST_URL: ${{ secrets.BID_LIST_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python cloud-sync-bid-list.py --url "$BID_LIST_URL" --supabase-write
