@@ -1,0 +1,49 @@
+name: Sync PROJECT LIST to Supabase
+
+# Third workflow in this repo. Runs every 15 min, downloads
+# PROJECT LIST.xlsm from a SharePoint share link, parses 87 projects
+# + 667 change orders + a meta row, writes them to public.projects_cloud.
+#
+# 15 min cadence is a middle ground:
+#   - PMs touch the project list more than budget but less than the bid list.
+#   - The xlsm is large (~14.6 MB) and parse takes ~30-60s on a runner;
+#     5-min cadence would burn ~10x more Actions minutes for marginal
+#     freshness gain.
+#   - Project / change-order edits aren't typically time-sensitive on
+#     the order of seconds.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-project-list
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run cloud parser -> Supabase
+        env:
+          # PROJECT_LIST_URL: the SharePoint "Anyone with the link can
+          #   view" share URL for PROJECT LIST.xlsm. Script appends
+          #   &download=1 itself.
+          # SUPABASE_SERVICE_KEY: same secret bid + budget workflows use.
+          PROJECT_LIST_URL: ${{ secrets.PROJECT_LIST_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python cloud-sync-project-list.py --url "$PROJECT_LIST_URL" --supabase-write

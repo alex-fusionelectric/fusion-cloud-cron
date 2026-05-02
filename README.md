@@ -5,11 +5,14 @@ downloads each xlsm from a SharePoint share link, parses it, and writes
 the rows to Supabase. Replaces the local `Sync-PortalData.ps1` chain
 Alex's PC runs today, so the data stays fresh whether his PC is on or not.
 
-Two workflows today:
+Three workflows today:
 - **BID LIST** (`sync-bid-list.yml`) — every 5 min, writes 1853 rows
   to `public.bids_cloud`.
 - **BUDGET LIST** (`sync-budget-list.yml`) — every 30 min, writes 46
   project rows + 1 aggregates meta row to `public.budgets_cloud`.
+- **PROJECT LIST** (`sync-project-list.yml`) — every 15 min, writes 87
+  project rows + 1 change-orders meta row (667 COs across 72 projects)
+  to `public.projects_cloud`.
 
 ## What's here
 
