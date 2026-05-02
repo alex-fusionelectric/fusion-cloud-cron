@@ -1,0 +1,49 @@
+name: Sync BUDGET LIST to Supabase
+
+# Companion to sync-bid-list.yml. Runs every 30 min, downloads
+# BUDGET LIST.xlsm from a SharePoint share link, parses 46 projects
+# (BAY + SAC) plus an aggregates meta row, writes them to
+# public.budgets_cloud.
+#
+# 30 min cadence is deliberate: budget data changes far slower than
+# bids -- a few times per workday during active project review, not
+# constantly. Running every 30 min instead of 5 keeps Actions minutes
+# negligible while still feeling fresh on the PM Panel.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+# Don't pile up if a run takes longer than 30 min (won't happen for a
+# 13 MB file but cheap insurance).
+concurrency:
+  group: sync-budget-list
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run cloud parser -> Supabase
+        env:
+          # BUDGET_LIST_URL: the SharePoint "Anyone with the link can
+          #   view" share URL for BUDGET LIST.xlsm. The script appends
+          #   &download=1 itself.
+          # SUPABASE_SERVICE_KEY: same secret bid-list workflow uses.
+          BUDGET_LIST_URL: ${{ secrets.BUDGET_LIST_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python cloud-sync-budget-list.py --url "$BUDGET_LIST_URL" --supabase-write

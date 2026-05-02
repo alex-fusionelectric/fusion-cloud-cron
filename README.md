@@ -1,10 +1,15 @@
 # fusion-cloud-cron
 
-Cloud-side BID LIST sync. Runs on GitHub Actions every 5 minutes,
-downloads `BID LIST.xlsm` from a SharePoint share link, parses it, and
-writes all rows to `public.bids_cloud` in Supabase. Replaces the local
-`Sync-PortalData.ps1` + `Push-ToSupabase.ps1` chain Alex's PC runs
-today, so the bid data stays fresh whether his PC is on or not.
+Cloud-side xlsm-to-Supabase sync. Runs on GitHub Actions on a schedule,
+downloads each xlsm from a SharePoint share link, parses it, and writes
+the rows to Supabase. Replaces the local `Sync-PortalData.ps1` chain
+Alex's PC runs today, so the data stays fresh whether his PC is on or not.
+
+Two workflows today:
+- **BID LIST** (`sync-bid-list.yml`) — every 5 min, writes 1853 rows
+  to `public.bids_cloud`.
+- **BUDGET LIST** (`sync-budget-list.yml`) — every 30 min, writes 46
+  project rows + 1 aggregates meta row to `public.budgets_cloud`.
 
 ## What's here
 
