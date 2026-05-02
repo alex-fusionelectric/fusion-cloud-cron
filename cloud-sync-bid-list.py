@@ -64,7 +64,11 @@ def fetch_xlsm_bytes(share_url):
     """
     sep = "&" if "?" in share_url else "?"
     url = share_url + sep + "download=1"
-    print(f"Downloading: {share_url[:80]}...")
+    # URL deliberately scrubbed -- this script runs in a public GitHub
+    # repo's workflow logs; even a truncated SharePoint URL leaks the
+    # tenant + file owner. Useful info kept (bytes received) is logged
+    # after the download completes.
+    print("Downloading SharePoint xlsm...")
 
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(

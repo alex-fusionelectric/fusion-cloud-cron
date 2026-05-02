@@ -39,7 +39,8 @@ SUPABASE_TABLE = "projects_cloud"
 def fetch_xlsm_bytes(share_url):
     sep = "&" if "?" in share_url else "?"
     url = share_url + sep + "download=1"
-    print(f"Downloading: {share_url[:80]}...")
+    # URL scrubbed -- public-repo workflow logs (see cloud-sync-bid-list.py).
+    print("Downloading SharePoint xlsm...")
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(
         urllib.request.HTTPCookieProcessor(cookie_jar),
