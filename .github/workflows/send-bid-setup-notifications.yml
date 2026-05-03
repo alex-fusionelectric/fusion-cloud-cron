@@ -1,0 +1,36 @@
+name: Send bid-setup notifications
+
+# Picks up rows in public.bid_setup_completions_cloud where notified_at IS
+# NULL, sends each one as an email manifest (autofill summary + plans/specs
+# files added) to the recipients listed on the row, then stamps notified_at
+# so we don't double-send.
+#
+# Runs every 5 minutes -- watcher writes completion rows on Alex's PC, this
+# picks them up shortly after.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: send-bid-setup-notifications
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Send bid setup notifications
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
+        run: python send-bid-setup-notifications.py
