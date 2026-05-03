@@ -1,0 +1,51 @@
+name: Sync SBX project details (bidder list + addenda)
+
+# For each active SBX listing (future bid date, electrical scope), fetch the
+# filter.aspx detail page and the plan-holder list. Writes to
+# public.sbx_project_details_cloud + public.sbx_plan_holders_cloud.
+#
+# Runs every 30 minutes so the bidder list stays fresh on the Bay Bid List
+# SBX Watchlist modal.
+#
+# Required GitHub Secrets: SUPABASE_SERVICE_KEY, SBX_USERNAME, SBX_PASSWORD
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      discovery:
+        description: "Capture raw_html for inspection (1 = yes)"
+        required: false
+        default: "1"
+      limit:
+        description: "Max projects to fetch this run"
+        required: false
+        default: "60"
+
+concurrency:
+  group: sync-sbx-details
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run SBX details scrape -> Supabase
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SBX_USERNAME: ${{ secrets.SBX_USERNAME }}
+          SBX_PASSWORD: ${{ secrets.SBX_PASSWORD }}
+          SBX_DETAIL_DISCOVERY: ${{ inputs.discovery || '1' }}
+          SBX_DETAIL_LIMIT: ${{ inputs.limit || '60' }}
+        run: python cloud-sync-sbx-details.py
