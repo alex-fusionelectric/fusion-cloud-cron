@@ -88,7 +88,9 @@ def _sb_request(method, path, *, body=None, headers_extra=None, timeout=30):
 def fetch_active_bids():
     # Server-side filter -- bids_cloud is ~1800 rows and PostgREST
     # default-limits at 1000 in PK order, dropping the active rows.
-    qs = 'status=in.("BIDDING","BID OR BAIL")&select=est_number,status,project_name&order=est_number'
+    # Spaces inside quoted in.() values need URL-encoding.
+    in_value = urllib.parse.quote('("BIDDING","BID OR BAIL")', safe='()",')
+    qs = f"status=in.{in_value}&select=est_number,status,project_name&order=est_number"
     status, body = _sb_request("GET", f"{BIDS_TABLE}?{qs}")
     if status != 200:
         raise SystemExit(f"bids_cloud GET failed: HTTP {status} {body[:200]!r}")
