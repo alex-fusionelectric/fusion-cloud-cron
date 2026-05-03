@@ -282,16 +282,28 @@ C10_PATTERNS = [
 
 
 def classify_scope(project_name, description, owner):
-    """Return (is_electrical, requires_c10, signals_list)."""
+    """Return (is_electrical, requires_c10, signals_list).
+
+    Decision tree:
+      strong positive -> electrical (negatives ignored)
+      weak positive + no negative -> electrical
+      building keyword + no negative -> electrical (new build / reno)
+      otherwise -> NOT electrical
+    """
     import re
     blob = " ".join(filter(None, [project_name or "", description or "", owner or ""])).lower()
 
     signals = []
-    pos_hit = False
-    for kw in ELECTRICAL_POSITIVE:
+    strong_hit = False
+    for kw in ELECTRICAL_STRONG_POSITIVE:
+        if kw in blob:
+            signals.append(f"++{kw.strip()}")
+            strong_hit = True
+    weak_hit = False
+    for kw in ELECTRICAL_WEAK_POSITIVE:
         if kw in blob:
             signals.append(f"+{kw.strip()}")
-            pos_hit = True
+            weak_hit = True
     bldg_hit = False
     for kw in BUILDING_KEYWORDS:
         if kw in blob:
@@ -303,20 +315,15 @@ def classify_scope(project_name, description, owner):
             signals.append(f"-{kw}")
             neg_hit = True
 
-    # Decision:
-    #   strong-positive (any electrical keyword) -> electrical regardless of negatives
-    #   building keyword + no negative -> probably electrical (new build / reno)
-    #   otherwise -> not electrical
-    if pos_hit:
+    if strong_hit:
         is_electrical = True
-    elif bldg_hit and not neg_hit:
+    elif (weak_hit or bldg_hit) and not neg_hit:
         is_electrical = True
     else:
         is_electrical = False
 
     requires_c10 = any(re.search(p, blob, re.IGNORECASE) for p in C10_PATTERNS)
 
-    # Cap signal list to keep storage compact.
     return is_electrical, requires_c10, signals[:20]
 
 
