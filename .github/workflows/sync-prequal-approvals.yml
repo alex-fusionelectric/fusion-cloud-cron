@@ -1,0 +1,39 @@
+name: Sync Prequal Approvals (Kim's emails)
+
+# Walks alex@fusionelectric-inc.com inbox for emails from Kim Dias about
+# prequalification approvals/renewals/expirations, runs Claude on each to
+# extract structured fields, writes to public.prequal_approvals_cloud.
+# Bay Bid List Prequal tab + SBX Watchlist cross-reference both consume
+# this table.
+#
+# Required secrets: GMAIL_TOKEN_JSON, CLAUDE_API_KEY, SUPABASE_SERVICE_KEY
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-prequal-approvals
+  cancel-in-progress: false
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt google-api-python-client google-auth-oauthlib
+      - name: Run prequal parser -> Supabase
+        env:
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python parse-prequal-emails.py
