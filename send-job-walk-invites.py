@@ -90,7 +90,12 @@ def _sb_request(method, path, body=None, headers_extra=None, timeout=30):
 
 
 def fetch_active_bids():
-    qs = ('status=in.("BIDDING","BID OR BAIL")&'
+    # The PostgREST `in.()` value contains a space ("BID OR BAIL") that
+    # Python 3.13's stricter URL validator rejects unless URL-encoded.
+    # urllib.parse.quote with safe='()",' preserves the literal punctuation
+    # PostgREST needs.
+    in_clause = urllib.parse.quote('("BIDDING","BID OR BAIL")', safe='()",')
+    qs = (f'status=in.{in_clause}&'
           'select=id,est_number,project_name,client_gc,estimator,project_engineer,'
           'documents_url,division,payload')
     status, body = _sb_request("GET", f"{BIDS_TABLE}?{qs}")
