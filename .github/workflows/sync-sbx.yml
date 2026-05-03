@@ -1,0 +1,43 @@
+name: Sync SBX (Sacramento Builders Exchange)
+
+# Logs into onlineplanservice.com with a Fusion member account, scrapes
+# Daily Projects / Daily Addenda / Bid Results / Bidding modes filtered
+# to Alex's 4 Bay-area counties, writes to public.sbx_listings_cloud.
+#
+# Runs every 4 hours on cron + on demand via workflow_dispatch. The
+# Bay PowerBid SBX Watchlist tab on Bay Bid List reads from this table.
+#
+# Required GitHub Secrets:
+#   SUPABASE_SERVICE_KEY
+#   SBX_USERNAME      -- onlineplanservice.com login email
+#   SBX_PASSWORD      -- onlineplanservice.com password
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-sbx
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run SBX scrape -> Supabase
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SBX_USERNAME: ${{ secrets.SBX_USERNAME }}
+          SBX_PASSWORD: ${{ secrets.SBX_PASSWORD }}
+        run: python cloud-sync-sbx.py

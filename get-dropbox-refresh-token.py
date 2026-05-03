@@ -68,6 +68,13 @@ def main():
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+        sys.exit(f"token exchange failed: HTTP {e.code}\n{body}")
     except Exception as e:  # noqa: BLE001
         sys.exit(f"token exchange failed: {e}")
 
