@@ -1,0 +1,41 @@
+name: Sync Bid Invitations (Bid Radar)
+
+# Walks Alex's Gmail for incoming bid invitations from GCs / agencies /
+# BuildingConnected / SmartBid / etc., runs Claude on each to extract
+# structured fields, writes to public.bid_invitations. Cache lives in
+# public.gmail_kv_cloud (key prefix "bidinv:") so re-runs are nearly free.
+#
+# Required secrets:
+#   GMAIL_TOKEN_JSON
+#   CLAUDE_API_KEY
+#   SUPABASE_SERVICE_KEY
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-bid-invitations
+  cancel-in-progress: false
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt google-api-python-client google-auth-oauthlib
+      - name: Run bid-invitations parser -> Supabase
+        env:
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python cloud-sync-bid-invitations.py
