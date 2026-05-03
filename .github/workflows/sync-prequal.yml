@@ -39,4 +39,5 @@ jobs:
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: python cloud-sync-prequal.py

@@ -58,6 +58,43 @@ def excel_date_to_iso(value):
         return None
 
 
+def excel_time_to_str(value):
+    """Pull the time-of-day out of a BID DATE / JOB WALK cell. Returns
+    something like '4:00 PM' or '' when the cell has no time component
+    (e.g. 'N/A' or a date with 12:00 AM which we treat as 'no time set')."""
+    if value is None or (hasattr(pd, "isna") and pd.isna(value)):
+        return ""
+    try:
+        ts = value if isinstance(value, pd.Timestamp) else pd.to_datetime(value)
+    except Exception:
+        return ""
+    # If hour and minute are both 0, BID DATE was probably entered as a
+    # date-only value -- skip rather than show a misleading "12:00 AM".
+    if ts.hour == 0 and ts.minute == 0:
+        return ""
+    hour12 = ((ts.hour - 1) % 12) + 1
+    ampm = "AM" if ts.hour < 12 else "PM"
+    return f"{hour12}:{ts.minute:02d} {ampm}"
+
+
+def excel_datetime_to_str(value):
+    """Format a full BID-LIST datetime cell as 'M/D/YY h:MM AM/PM' for
+    display, or '' on bad/empty input. Used for JOB WALK which the team
+    keeps as a single combined cell."""
+    if value is None or (hasattr(pd, "isna") and pd.isna(value)):
+        return ""
+    s = str(value).strip()
+    if not s or s.lower() == "n/a":
+        return ""
+    try:
+        ts = value if isinstance(value, pd.Timestamp) else pd.to_datetime(value)
+    except Exception:
+        return s
+    hour12 = ((ts.hour - 1) % 12) + 1
+    ampm = "AM" if ts.hour < 12 else "PM"
+    return f"{ts.month}/{ts.day}/{str(ts.year)[2:]} {hour12}:{ts.minute:02d} {ampm}"
+
+
 def safe_number(value):
     if value is None or pd.isna(value):
         return 0
@@ -219,7 +256,7 @@ def parse_bids(df, allowed, pe_map=None):
             "contact": "",
             "location": "",
             "scope": "",
-            "jobWalk": str(row_value(row, ["JOB WALK", "Job Walk"]) or "").strip(),
+            "jobWalk": excel_datetime_to_str(row_value(row, ["JOB WALK", "Job Walk"])),
             "estimator": estimator,
             "projectEngineer": project_engineer,
             "division": division,
@@ -227,7 +264,7 @@ def parse_bids(df, allowed, pe_map=None):
             "bidAmount": bid_amount,
             "awardedAmount": 0,
             "itemDueMod": safe_number(row_value(row, ["ITEM DUE MOD", "ITEM DUE MOD."])),
-            "bidDueTime": str(row_value(row, ["TIME DUE", "BID TIME", "DUE TIME", "Time Due"]) or "").strip(),
+            "bidDueTime": excel_time_to_str(row_value(row, ["BID DATE", "Bid Date"])),
             "setup": coerce_bool(row_value(row, ["SETUP"])),
             "documentsReview": coerce_bool(row_value(row, ["DOCUMENTS REVIEW"])),
             "requestQuotes": coerce_bool(row_value(row, ["REQUEST QUOTES"])),
@@ -277,7 +314,7 @@ def parse_follow(df, allowed, pe_map=None):
             "contact": "",
             "location": "",
             "scope": "",
-            "jobWalk": str(row_value(row, ["JOB WALK", "Job Walk"]) or "").strip(),
+            "jobWalk": excel_datetime_to_str(row_value(row, ["JOB WALK", "Job Walk"])),
             "estimator": estimator,
             "projectEngineer": project_engineer,
             "division": division,
@@ -285,7 +322,7 @@ def parse_follow(df, allowed, pe_map=None):
             "bidAmount": bid_amount,
             "awardedAmount": awarded_amount,
             "itemDueMod": safe_number(row_value(row, ["ITEM DUE MOD", "ITEM DUE MOD."])),
-            "bidDueTime": str(row_value(row, ["TIME DUE", "BID TIME", "DUE TIME", "Time Due"]) or "").strip(),
+            "bidDueTime": excel_time_to_str(row_value(row, ["BID DATE", "Bid Date"])),
             "setup": coerce_bool(row_value(row, ["SETUP"])),
             "documentsReview": coerce_bool(row_value(row, ["DOCUMENTS REVIEW"])),
             "requestQuotes": coerce_bool(row_value(row, ["REQUEST QUOTES"])),
@@ -332,7 +369,7 @@ def parse_archive(df, allowed, pe_map=None):
             "contact": "",
             "location": "",
             "scope": "",
-            "jobWalk": str(row_value(row, ["JOB WALK", "Job Walk"]) or "").strip(),
+            "jobWalk": excel_datetime_to_str(row_value(row, ["JOB WALK", "Job Walk"])),
             "estimator": estimator,
             "projectEngineer": project_engineer,
             "division": division,
@@ -340,7 +377,7 @@ def parse_archive(df, allowed, pe_map=None):
             "bidAmount": bid_amount,
             "awardedAmount": awarded_amount,
             "itemDueMod": safe_number(row_value(row, ["ITEM DUE MOD", "ITEM DUE MOD."])),
-            "bidDueTime": str(row_value(row, ["TIME DUE", "BID TIME", "DUE TIME", "Time Due"]) or "").strip(),
+            "bidDueTime": excel_time_to_str(row_value(row, ["BID DATE", "Bid Date"])),
             "setup": coerce_bool(row_value(row, ["SETUP"])),
             "documentsReview": coerce_bool(row_value(row, ["DOCUMENTS REVIEW"])),
             "requestQuotes": coerce_bool(row_value(row, ["REQUEST QUOTES"])),

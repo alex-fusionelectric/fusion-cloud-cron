@@ -48,13 +48,17 @@ PREQUAL_TABLE = "prequal_cloud"
 KV_TABLE = "dropbox_kv_cloud"
 BIDS_TABLE = "bids_cloud"
 
+CLAUDE_API_KEY = (os.environ.get("CLAUDE_API_KEY") or "").strip()
+
 DEFAULT_DROPBOX_ROOT = "/Fusion Electric Folder/02- ESTIMATING"
 ACTIVE_BID_STATUSES = {"BIDDING", "BID OR BAIL"}
 
 # Per-bid candidate cap. Local scanner does up to ~5 candidates per bid;
 # cloud honors the same shape but skips files >5 MB to keep download budget reasonable.
-MAX_CANDIDATES_PER_BID = 5
-MAX_PDF_BYTES = 5 * 1024 * 1024  # 5 MB
+MAX_CANDIDATES_PER_BID = 10  # widened so we don't miss prequal callouts in less-prioritized PDFs (e.g. Walden West missed "prequal not required" because the relevant doc was beyond the first 5)
+MAX_PDF_BYTES = 6 * 1024 * 1024  # 6 MB
+MAX_PAGES_PER_PDF = 80  # was 40 -- school district project manuals can have prequal language deep in Div 00
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
 
 # --- Supabase REST helpers ---------------------------------------------------
@@ -259,6 +263,70 @@ def cache_key_for(file_meta):
     return f"{file_meta.path_lower}@{file_meta.rev}"
 
 
+def llm_prequal_verdict(excerpts, *, project_name, owner, api_key):
+    """Send prequal-relevant excerpts to Claude for a final verdict when
+    the regex scan is uncertain. School district / public-agency specs
+    often phrase the answer in non-obvious ways the keyword regex misses
+    (e.g. 'Bidder prequalification questionnaire is not applicable to
+    this project', 'No DSA prequalification needed for this scope').
+
+    Returns (verdict, evidence) or (None, None) on failure."""
+    if not excerpts or not api_key:
+        return None, None
+    blob = "\n\n---\n\n".join(excerpts[:6])[:14000]
+    prompt = f"""You are reading excerpts from California public-agency (school district / city / county / university) construction bid documents to determine whether BIDDER PREQUALIFICATION is required for the prime electrical contractor on this project. Fusion Electric is the contractor.
+
+Project: {project_name}
+Owner / Agency: {owner or 'unknown'}
+
+Excerpts (each separated by ---):
+{blob}
+
+Answer with ONLY a JSON object, no prose:
+{{
+  "verdict": "yes" | "no" | "unknown",
+  "evidence": "short quote (<= 280 chars) from the excerpts that justifies the verdict",
+  "reasoning_summary": "one-sentence explanation"
+}}
+
+Rules:
+- "yes" if the doc clearly requires bidder/contractor prequalification (DSA, DIR PWCR, district prequal questionnaire, etc.)
+- "no" if the doc explicitly says prequalification is NOT required / not applicable / waived / not necessary
+- "unknown" only if neither is clearly stated
+"""
+    body_bytes = json.dumps({
+        "model": CLAUDE_MODEL,
+        "max_tokens": 400,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body_bytes, method="POST",
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:  # noqa: BLE001
+        print(f"  [llm-warn] {e}")
+        return None, None
+    text = ""
+    for c in data.get("content", []):
+        if c.get("type") == "text":
+            text += c.get("text", "")
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+    try:
+        obj = json.loads(text)
+    except Exception:  # noqa: BLE001
+        return None, None
+    v = (obj.get("verdict") or "").lower()
+    if v not in ("yes", "no", "unknown"):
+        return None, None
+    return v, (obj.get("evidence") or "")[:280]
+
+
 def get_or_extract_text(dbx, file_meta, kv_cache_local):
     """Return (text, was_cached). Prefer local-batch cache, then
     dropbox_kv_cloud, then download + pypdf + upsert."""
@@ -273,7 +341,7 @@ def get_or_extract_text(dbx, file_meta, kv_cache_local):
     except (ApiError, urllib.error.HTTPError) as e:
         print(f"  [warn] download failed for {file_meta.path_display}: {e}")
         return "", False
-    text, err = sp.extract_text_from_bytes(pdf_bytes, max_pages=40)
+    text, err = sp.extract_text_from_bytes(pdf_bytes, max_pages=MAX_PAGES_PER_PDF)
     if err:
         print(f"  [warn] pypdf failed for {file_meta.name}: {err}")
         text = ""
@@ -370,6 +438,10 @@ def main():
         candidates = candidates_by_est.get(est, [])
         verdict, evidence, source_file = "unknown", "", ""
         scanned, fetched = 0, 0
+        # Collect per-PDF text so we can build a Claude fallback context
+        # if the keyword scan stays uncertain. Cap stored excerpts to keep
+        # the LLM prompt under model input limits.
+        prequal_excerpts = []
         for f in candidates:
             text, was_cached = get_or_extract_text(dbx, f, kv_cache)
             scanned += 1
@@ -379,6 +451,15 @@ def main():
             if not text:
                 continue
             v, e = sp.search_pdf(text)
+            # Even when the verdict is "unknown", harvest paragraphs that
+            # mention prequalification so Claude has context for the
+            # fallback. This catches phrasings the regex misses.
+            for m in re.finditer(r"[\s\S]{0,300}prequalif\w*[\s\S]{0,300}", text, re.IGNORECASE):
+                snippet = re.sub(r"\s+", " ", m.group(0)).strip()
+                tag = f.name
+                prequal_excerpts.append(f"[{tag}] {snippet[:600]}")
+                if len(prequal_excerpts) >= 8:
+                    break
             if v == "yes":
                 verdict, evidence = "yes", e.strip()
                 source_file = f.path_display.split(bf["folder_name"], 1)[-1].lstrip("/")
@@ -386,16 +467,36 @@ def main():
             if v == "no" and verdict != "yes":
                 verdict, evidence = "no", e.strip()
                 source_file = f.path_display.split(bf["folder_name"], 1)[-1].lstrip("/")
+
+        # Claude fallback: only fires when keyword scan stayed "unknown"
+        # AND we found at least one paragraph mentioning prequalification.
+        # If Claude sees nothing relevant, it returns "unknown" and we keep
+        # the original verdict.
+        used_llm = False
+        if verdict == "unknown" and prequal_excerpts and CLAUDE_API_KEY:
+            llm_v, llm_e = llm_prequal_verdict(
+                prequal_excerpts,
+                project_name=bf["folder_name"],
+                owner=None,
+                api_key=CLAUDE_API_KEY,
+            )
+            if llm_v in ("yes", "no"):
+                verdict, evidence = llm_v, llm_e or "Claude classifier (no excerpt returned)"
+                source_file = source_file or "(via Claude on Div-00 excerpts)"
+                used_llm = True
+
         out[est] = {
             "prequal_required": verdict,
             "evidence": evidence[:280],
             "source_file": source_file,
             "scanned_pdfs": scanned,
             "fetched_from_cloud": fetched,
+            "claude_fallback": used_llm,
             "scanned_at": started,
         }
         fetch_note = f" +{fetched} fetched" if fetched else ""
-        print(f"  {est:>8}  {verdict:>7}  ({scanned} pdfs scanned{fetch_note})")
+        llm_note = " [via Claude]" if used_llm else ""
+        print(f"  {est:>8}  {verdict:>7}  ({scanned} pdfs scanned{fetch_note}{llm_note})")
 
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
