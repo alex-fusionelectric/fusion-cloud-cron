@@ -88,28 +88,59 @@ def upsert(table, rows, *, batch=200):
     return sent
 
 
-def fetch_active_listings(limit):
-    """Pull active SBX rows worth fetching detail pages for. Sorted by:
-    1. Bid date soon (closer = more urgent)
-    2. Last fetched longest ago (rotate through everything)
+def fetch_setup_listings(limit):
+    """Only scrape detail pages for opsplannums that Alex has actually SET UP
+    via the SBX Watchlist's "Setup Test Bid" button. These live in
+    public.prebid_bids_cloud with a non-null sbx_id ("{mode}::{opsplannum}")
+    or an sbx_listing jsonb with opsplannum. We then look up the matching
+    sbx_listings_cloud row to get bid_package_id (which is what filter.aspx
+    needs).
     """
-    today = datetime.now(timezone.utc).date().isoformat()
-    # Pull all bidding-mode rows with a future bid date, electrical scope,
-    # in our default counties. Joined info we don't have here -- the simple
-    # filter is mode + future date + is_electrical.
+    st, body = _sb("GET", "prebid_bids_cloud?select=id,sbx_id,sbx_listing,bid_due_date,project_name&order=created_at.desc")
+    if st != 200:
+        raise SystemExit(f"failed to fetch prebid_bids_cloud: HTTP {st}")
+    prebids = json.loads(body)
+
+    # Extract opsplannums + map to project name fallback
+    plannum_set = []
+    name_by_pn = {}
+    for r in prebids:
+        sbx_id = (r.get("sbx_id") or "").strip()
+        pn = ""
+        if "::" in sbx_id:
+            pn = sbx_id.split("::", 1)[1].strip()
+        else:
+            sl = r.get("sbx_listing") or {}
+            pn = (sl.get("opsplannum") or "").strip()
+        if not pn:
+            continue
+        if pn not in plannum_set:
+            plannum_set.append(pn)
+            name_by_pn[pn] = r.get("project_name")
+    if not plannum_set:
+        return []
+
+    # Look up each in sbx_listings_cloud to get bid_package_id. Take the most
+    # recent row per opsplannum across all modes (mode doesn't matter here --
+    # all modes carry the same bid_package_id for a given project).
+    in_clause = ",".join(plannum_set)
     q = (f"sbx_listings_cloud?select=opsplannum,bid_package_id,project_link,project_name,bid_date,county,mode"
-         f"&mode=in.(biddingprojects,dailyprojects,dailyaddenda)"
-         f"&bid_date=gte.{today}"
-         f"&is_electrical=eq.true"
-         f"&order=bid_date.asc&limit={limit*4}")  # over-fetch, we dedup by opsplannum
+         f"&opsplannum=in.({in_clause})&order=updated_at.desc")
     st, body = _sb("GET", q)
     if st != 200:
-        raise SystemExit(f"failed to fetch listings: HTTP {st}")
+        raise SystemExit(f"failed to fetch sbx_listings_cloud: HTTP {st}")
     rows = json.loads(body)
     seen = {}
     for r in rows:
-        seen.setdefault(r["opsplannum"], r)  # first wins (already sorted)
-    return list(seen.values())[:limit]
+        # First (most-recent) wins
+        seen.setdefault(r["opsplannum"], r)
+    # Order by bid_date ascending so the most-imminent bids get refreshed first
+    out = list(seen.values())
+    # For prebid rows that exist but have no SBX listing match (e.g. bid invitation
+    # source), fall back to a stub with whatever data we have. Skip if no BPID --
+    # without bid_package_id we can't fetch the detail page.
+    out.sort(key=lambda x: (x.get("bid_date") or "9999-12-31"))
+    return out[:limit]
 
 
 def fetch_recent_detail_fetches():
@@ -375,10 +406,10 @@ def main():
     print(f"SBX details scrape: limit={limit} discovery={discovery} min_interval_min={min_interval}")
     started = time.time()
 
-    listings = fetch_active_listings(limit * 3)  # over-fetch, then filter by recency
-    print(f"  candidate listings: {len(listings)}")
+    listings = fetch_setup_listings(limit * 3)  # only opsplannums Alex has SET UP
+    print(f"  candidate setup listings: {len(listings)}")
     if not listings:
-        print("  no active SBX listings to scrape, exiting.")
+        print("  no set-up SBX bids to scrape, exiting.")
         return
 
     recent = fetch_recent_detail_fetches()
@@ -427,6 +458,21 @@ def main():
         ph_url, ph_html = try_planholder_endpoints(opener, bpid, plannum)
         holders = parse_planholders(ph_html) if ph_html else []
         print(f"detail OK ({len(html)//1024}KB), planholder src: {ph_url or 'none'} ({len(holders)} parsed)")
+        # DISCOVERY: dump distinctive snippets of planholder HTML on first project
+        # only, so we can see the structure without flooding the log.
+        if discovery and i == 1 and ph_html:
+            print(f"\n--- PLANHOLDER HTML SAMPLE (first {min(4000, len(ph_html))} chars) ---")
+            print(ph_html[:4000])
+            print("--- END SAMPLE ---\n")
+            # Also print any class/id attributes that might be anchor points
+            classes = sorted(set(re.findall(r'class="([^"]+)"', ph_html)))[:30]
+            ids = sorted(set(re.findall(r'id="([^"]+)"', ph_html)))[:30]
+            print(f"  ph classes (sample): {classes}")
+            print(f"  ph ids (sample): {ids}")
+            # Count tables/rows
+            print(f"  ph <table> count: {ph_html.lower().count('<table')}")
+            print(f"  ph <tr> count: {ph_html.lower().count('<tr')}")
+            print(f"  ph <li> count: {ph_html.lower().count('<li')}\n")
 
         now_iso = datetime.now(timezone.utc).isoformat()
         detail_row = {
