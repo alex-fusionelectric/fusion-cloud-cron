@@ -1,0 +1,33 @@
+name: Sync Employees to Supabase
+
+# Reads the EMPLOYEES sheet from PROJECT LIST.xlsm. Reuses the
+# PROJECT_LIST_URL secret since employees live in the same xlsm.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-employees
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run cloud parser -> Supabase
+        env:
+          PROJECT_LIST_URL: ${{ secrets.PROJECT_LIST_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python cloud-sync-employees.py --url "$PROJECT_LIST_URL" --supabase-write
