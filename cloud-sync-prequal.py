@@ -85,15 +85,18 @@ def _sb_request(method, path, *, body=None, headers_extra=None, timeout=30):
 
 
 def fetch_active_bids():
-    status, body = _sb_request("GET", f"{BIDS_TABLE}?select=est_number,status,project_name&order=est_number")
+    # Server-side filter -- bids_cloud has 1800+ rows and PostgREST
+    # default-limits to 1000 in PK order, which would silently drop the
+    # active bids (they live near the end of the est_number ordering).
+    qs = 'status=in.("BIDDING","BID OR BAIL")&select=est_number,status,project_name&order=est_number'
+    status, body = _sb_request("GET", f"{BIDS_TABLE}?{qs}")
     if status != 200:
         raise SystemExit(f"bids_cloud GET failed: HTTP {status} {body[:200]!r}")
     rows = json.loads(body)
     out = []
     for r in rows:
         est = (r.get("est_number") or "").strip().upper()
-        st = (r.get("status") or "").strip().upper()
-        if est and st in ACTIVE_BID_STATUSES:
+        if est:
             out.append({"est": est, "project_name": r.get("project_name") or ""})
     print(f"Active bids from bids_cloud: {len(out)} (filter: {sorted(ACTIVE_BID_STATUSES)})")
     return out
