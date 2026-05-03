@@ -85,7 +85,7 @@ def _sb_request(method, path, *, body=None, headers_extra=None, timeout=30):
 
 
 def fetch_active_bids():
-    status, body = _sb_request("GET", f"{BIDS_TABLE}?select=est_number,status,name&order=est_number")
+    status, body = _sb_request("GET", f"{BIDS_TABLE}?select=est_number,status,project_name&order=est_number")
     if status != 200:
         raise SystemExit(f"bids_cloud GET failed: HTTP {status} {body[:200]!r}")
     rows = json.loads(body)
@@ -94,7 +94,7 @@ def fetch_active_bids():
         est = (r.get("est_number") or "").strip().upper()
         st = (r.get("status") or "").strip().upper()
         if est and st in ACTIVE_BID_STATUSES:
-            out.append({"est": est, "name": r.get("name") or ""})
+            out.append({"est": est, "project_name": r.get("project_name") or ""})
     print(f"Active bids from bids_cloud: {len(out)} (filter: {sorted(ACTIVE_BID_STATUSES)})")
     return out
 
@@ -290,7 +290,7 @@ def main():
             # 'name' column so we match what the local scanner sees.
             bid_folders.append({"est": b["est"], "path": path_lower, "folder_name": folder_name})
         else:
-            bid_folders.append({"est": b["est"], "path": None, "folder_name": b["name"]})
+            bid_folders.append({"est": b["est"], "path": None, "folder_name": b["project_name"]})
 
     # First pass: collect every file-metadata we'll consider so we can
     # batch-load the kv cache (one Supabase round-trip instead of N).
