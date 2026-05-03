@@ -170,8 +170,13 @@ def sbx_login():
 # --- Grid scrape -------------------------------------------------------------
 
 def fetch_mode(opener, mode, *, page_limit, counties):
-    """Yield raw project records for `mode`, filtered to `counties`."""
+    """Yield raw project records for `mode`, filtered to `counties`.
+
+    The API ignores pagesize > ~50 and always returns at most 50 per page.
+    We detect "no more results" by either an empty Projects array or by
+    running total catching up to data.Count. page_limit is a hard ceiling."""
     out = []
+    seen = 0
     for page in range(1, page_limit + 1):
         url = f"{GRID_URL}?mode={mode}&page={page}&pagesize={PAGE_SIZE}"
         try:
@@ -185,13 +190,14 @@ def fetch_mode(opener, mode, *, page_limit, counties):
             break
         kept = [p for p in page_projects if (p.get("County") or "").strip() in counties]
         out.extend(kept)
+        seen += len(page_projects)
         total = data.get("Count") or 0
-        print(f"  {mode} page {page:>2}: {len(page_projects)} fetched, {len(kept)} match counties (running total: {len(out)} / {total} in set)")
-        # Stop early if we got fewer than a full page.
-        if len(page_projects) < PAGE_SIZE:
+        print(f"  {mode} page {page:>2}: {len(page_projects)} fetched, {len(kept)} match counties (county-kept total: {len(out)}; seen {seen} / {total} in set)")
+        # Stop when we've pulled every record the API claims exists.
+        if total and seen >= total:
             break
         # Polite throttle
-        time.sleep(0.4)
+        time.sleep(0.3)
     return out
 
 
