@@ -232,7 +232,7 @@ def parse_jobwalk(s):
 
 # --- Build .ics --------------------------------------------------------------
 
-def ics_for_jobwalk(uid, *, project_name, est_number, start, location, organizer, description):
+def ics_for_jobwalk(uid, *, project_name, est_number, start, location, organizer, description, attendees=None):
     end = start + dt.timedelta(hours=1)
     def esc(s):
         return (s or "").replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
@@ -240,6 +240,19 @@ def ics_for_jobwalk(uid, *, project_name, est_number, start, location, organizer
         return d.strftime("%Y%m%dT%H%M%S")
     summary = f"Job Walk - EST# {est_number} {project_name}"
     now_utc = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    # Gmail (and Outlook) only render the "Yes / Maybe / No" calendar banner
+    # at the top of the email when the recipient appears as an ATTENDEE in
+    # the VEVENT. Without these lines the .ics arrives as a generic
+    # attachment with no inline accept controls.
+    attendee_lines = ""
+    for em in (attendees or []):
+        em = (em or "").strip()
+        if not em or "@" not in em:
+            continue
+        attendee_lines += (
+            f"ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;"
+            f"PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN={em}:mailto:{em}\r\n"
+        )
     return (
         "BEGIN:VCALENDAR\r\n"
         "VERSION:2.0\r\n"
@@ -253,10 +266,14 @@ def ics_for_jobwalk(uid, *, project_name, est_number, start, location, organizer
         # Gmail show them in the user's local TZ which matches Fusion's PT.
         f"DTSTART:{stamp(start)}\r\n"
         f"DTEND:{stamp(end)}\r\n"
+        "SEQUENCE:0\r\n"
+        "STATUS:CONFIRMED\r\n"
+        "TRANSP:OPAQUE\r\n"
         f"SUMMARY:{esc(summary)}\r\n"
         f"DESCRIPTION:{esc(description)}\r\n"
         f"LOCATION:{esc(location)}\r\n"
         f"ORGANIZER;CN=Fusion Electric:mailto:{organizer}\r\n"
+        f"{attendee_lines}"
         "END:VEVENT\r\n"
         "END:VCALENDAR\r\n"
     )
@@ -355,6 +372,7 @@ def main():
             ics_uid,
             project_name=project, est_number=est, start=start,
             location=location, organizer=sender, description=description,
+            attendees=recipients,
         )
         subject = f"Job Walk: EST# {est} {project} - {start.strftime('%a %b %d, %I:%M %p')}"
         body_text = description + "\n\nThis email contains a calendar invite (.ics attachment)."
