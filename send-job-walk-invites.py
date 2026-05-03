@@ -39,7 +39,10 @@ except ImportError as exc:
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 BIDS_TABLE = "bids_cloud"
 SENT_TABLE = "job_walk_invites_sent_cloud"
+KV_TABLE = "dropbox_kv_cloud"
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+CLAUDE_API_KEY = (os.environ.get("CLAUDE_API_KEY") or "").strip()
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
 # Default invite recipients always include Alex; the bid's estimator + PE
 # get added when present.
@@ -111,6 +114,91 @@ def record_sent(row):
     )
     if status not in (200, 201, 204):
         print(f"[warn] sent insert failed: HTTP {status} {body[:200]!r}")
+
+
+# --- Spec-doc location extraction ------------------------------------------
+
+def fetch_cached_spec_text_for_est(est_number):
+    """Pull every dropbox_kv_cloud row whose key path mentions this EST#
+    (e.g. '/fusion electric folder/02- estimating/est# 25-396 .../...pdf@rev').
+    The prequal scanner populated these. Returns concatenated text, capped."""
+    if not est_number:
+        return ""
+    # PostgREST key like.* operator with URL-escaped wildcards. Use lower
+    # case since path_lower is what gets stored.
+    pattern = f"%est# {est_number.lower()}%"
+    qs = f"key=ilike.{urllib.parse.quote(pattern)}&select=key,value&limit=20"
+    status, body = _sb_request("GET", f"{KV_TABLE}?{qs}")
+    if status != 200:
+        return ""
+    rows = json.loads(body)
+    chunks = []
+    for r in rows:
+        v = r.get("value") or {}
+        t = v.get("text") if isinstance(v, dict) else None
+        if t:
+            chunks.append(t)
+    return "\n\n".join(chunks)[:100000]  # cap so we don't OOM
+
+
+def extract_jobwalk_location(spec_text, *, project_name, fallback_location):
+    """Send spec text near 'job walk' / 'pre-bid' mentions to Claude and
+    ask for the meeting location. Returns a clean location string, or
+    fallback_location if nothing useful comes back."""
+    if not spec_text or not CLAUDE_API_KEY:
+        return fallback_location
+    # Pull paragraphs around any job-walk / pre-bid keyword. Most specs say
+    # "Pre-bid conference will be held at [address]" or "Job walk to meet
+    # at [room/door]".
+    excerpts = []
+    for m in re.finditer(r"[\s\S]{0,400}(?:job\s*walk|pre[-\s]?bid\s*conference|pre[-\s]?bid\s*meeting|mandatory\s*walk|site\s*visit)[\s\S]{0,400}",
+                         spec_text, re.IGNORECASE):
+        snippet = re.sub(r"\s+", " ", m.group(0)).strip()
+        excerpts.append(snippet[:800])
+        if len(excerpts) >= 6:
+            break
+    if not excerpts:
+        return fallback_location
+    blob = "\n\n---\n\n".join(excerpts)[:9000]
+    prompt = f"""You are reading excerpts from a public-agency construction bid spec to find the job-walk meeting LOCATION.
+
+Project: {project_name}
+Excerpts:
+{blob}
+
+Return ONLY a JSON object (no prose, no markdown):
+{{
+  "location": "exact meeting address or building/room (e.g. '123 Main St, Hayward CA — Lobby of Bldg A'), or empty string if not stated"
+}}
+"""
+    body_bytes = json.dumps({
+        "model": CLAUDE_MODEL,
+        "max_tokens": 200,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body_bytes, method="POST",
+        headers={"x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:  # noqa: BLE001
+        print(f"  [llm-warn] {e}")
+        return fallback_location
+    text = ""
+    for c in data.get("content", []):
+        if c.get("type") == "text":
+            text += c.get("text", "")
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+    try:
+        loc = (json.loads(text).get("location") or "").strip()
+    except Exception:  # noqa: BLE001
+        return fallback_location
+    return loc[:200] if loc else fallback_location
 
 
 # --- Parse JOB WALK string --------------------------------------------------
@@ -239,7 +327,15 @@ def main():
         project = b.get("project_name") or "(untitled)"
         gc = b.get("client_gc") or ""
         docs = b.get("documents_url") or ""
-        location = (payload.get("location") or "").strip() or gc or "TBD"
+        # Location precedence:
+        #   1. Claude extraction from cached spec docs (where the bid invite
+        #      actually states the meeting location)
+        #   2. payload.location from BID LIST
+        #   3. client_gc as a fuzzy fallback
+        #   4. "TBD"
+        fallback = (payload.get("location") or "").strip() or gc or "TBD"
+        spec_text = fetch_cached_spec_text_for_est(est)
+        location = extract_jobwalk_location(spec_text, project_name=project, fallback_location=fallback)
         ics_uid = f"jobwalk-{b['id']}-{h}@fusionelectric-inc.com"
         description = "\n".join(filter(None, [
             f"Project: EST# {est} {project}",
