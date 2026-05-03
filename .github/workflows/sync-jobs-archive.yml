@@ -1,0 +1,35 @@
+name: Sync Jobs Archive to Supabase
+
+# Reads BUDGET LIST.xlsm > JOBS sheet (+ COSTS - BUDGS, CC - ACT
+# sheets for cost rollups). Reuses BUDGET_LIST_URL secret.
+#
+# Triggered by the Netlify cron + schedule fallback.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-jobs-archive
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run cloud parser -> Supabase
+        env:
+          BUDGET_LIST_URL: ${{ secrets.BUDGET_LIST_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python cloud-sync-jobs-archive.py --url "$BUDGET_LIST_URL" --supabase-write
