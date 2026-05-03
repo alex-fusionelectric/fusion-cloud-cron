@@ -44,8 +44,11 @@ GRID_URL = f"{SBX_BASE}/ajax_grid_datasource.aspx"
 
 DEFAULT_COUNTIES = {"Alameda", "Contra Costa", "Santa Clara", "San Mateo"}
 DEFAULT_MODES = ("dailyprojects", "dailyaddenda", "bidresultsprojects", "biddingprojects")
-DEFAULT_PAGE_LIMIT = 20
-PAGE_SIZE = 200  # site default is 50; 200 is the max it accepts cleanly
+DEFAULT_PAGE_LIMIT = 50
+PAGE_SIZE = 200  # site default is 50 -- API ignores pagesize > 50, so the
+                 # actual records-per-page is ~50. With page_limit=50 we get
+                 # up to 2500 rows per mode, enough to cover biddingprojects
+                 # (2081 total CA-wide as of this comment) without truncation.
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120 Safari/537.36")
