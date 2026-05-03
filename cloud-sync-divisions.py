@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 import dropbox  # noqa: E402
+from dropbox import common as dropbox_common  # noqa: E402
 from dropbox.exceptions import ApiError, AuthError  # noqa: E402
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -41,7 +42,7 @@ DIVISIONS_TABLE = "divisions_cloud"
 KV_TABLE = "dropbox_kv_cloud"
 BIDS_TABLE = "bids_cloud"
 
-DEFAULT_DROPBOX_ROOT = "/FUSION ELECTRIC Folder/02- ESTIMATING"
+DEFAULT_DROPBOX_ROOT = "/Fusion Electric Folder/02- ESTIMATING"
 ACTIVE_BID_STATUSES = {"BIDDING", "BID OR BAIL"}
 
 # Spec-name keywords used to pick PDF candidates -- mirrors local
@@ -152,6 +153,9 @@ def upsert_divisions_row(payload):
 # to keep both scripts standalone without a shared module) -------------------
 
 def dropbox_client():
+    """Same path-root-aware client as cloud-sync-prequal.py uses. Team
+    namespace required because Fusion Electric folders live in the team
+    root, not Alex's personal home namespace."""
     refresh = (os.environ.get("DROPBOX_REFRESH_TOKEN") or "").strip()
     app_key = (os.environ.get("DROPBOX_APP_KEY") or "").strip()
     app_secret = (os.environ.get("DROPBOX_APP_SECRET") or "").strip()
@@ -164,9 +168,16 @@ def dropbox_client():
         timeout=60,
     )
     try:
-        dbx.users_get_current_account()
+        acct = dbx.users_get_current_account()
     except AuthError as e:
         raise SystemExit(f"Dropbox auth failed: {e}")
+    ri = acct.root_info
+    root_ns = getattr(ri, "root_namespace_id", None)
+    home_ns = getattr(ri, "home_namespace_id", None)
+    print(f"Dropbox account: {acct.email} (team_ns={root_ns}, home_ns={home_ns})")
+    if root_ns and root_ns != home_ns:
+        dbx = dbx.with_path_root(dropbox_common.PathRoot.root(root_ns))
+        print(f"  Using team root namespace {root_ns}")
     return dbx
 
 
