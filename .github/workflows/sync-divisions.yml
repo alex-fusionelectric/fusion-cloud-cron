@@ -1,0 +1,46 @@
+name: Sync Divisions (Dropbox)
+
+# Replaces local Convert-Divisions.ps1. Reads active-bid spec PDFs from
+# Dropbox via OAuth, scans for CSI section numbers (Div 26/27/28), maps
+# to Fusion scopes, writes payload to public.divisions_cloud which Bay
+# Bid List reads for the "Recommended Scopes" pill row.
+#
+# Shares dropbox_kv_cloud cache with sync-prequal -- a PDF extracted by
+# either workflow is a cache hit for the other.
+#
+# Required GitHub Secrets:
+#   SUPABASE_SERVICE_KEY
+#   DROPBOX_REFRESH_TOKEN
+#   DROPBOX_APP_KEY
+#   DROPBOX_APP_SECRET
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-divisions
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run cloud parser -> Supabase
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+        run: python cloud-sync-divisions.py

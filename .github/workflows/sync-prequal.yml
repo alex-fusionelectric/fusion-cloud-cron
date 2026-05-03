@@ -1,0 +1,42 @@
+name: Sync Prequal (Dropbox)
+
+# Replaces local Convert-Prequal.ps1. Reads active-bid spec PDFs from
+# Dropbox via OAuth, classifies prequalification posture, writes payload
+# to public.prequal_cloud which the Bay Bid List page reads.
+#
+# Required GitHub Secrets:
+#   SUPABASE_SERVICE_KEY
+#   DROPBOX_REFRESH_TOKEN  -- long-lived OAuth refresh token
+#   DROPBOX_APP_KEY
+#   DROPBOX_APP_SECRET
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-prequal
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run cloud parser -> Supabase
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+        run: python cloud-sync-prequal.py
