@@ -198,53 +198,80 @@ def fetch_mode(opener, mode, *, page_limit, counties):
 # Keyword-based for now -- robust, fast, deterministic. If precision becomes
 # an issue we can layer a Claude call on the ambiguous middle.
 
-ELECTRICAL_POSITIVE = [
-    "electrical", "electric ", "electrician", "electricl",  # common typo
-    "lighting", "light fixture", "luminaire", "lamp ",
+# Strong positives: presence is enough to mark electrical regardless of negatives.
+ELECTRICAL_STRONG_POSITIVE = [
+    "electrical", "electrician", "electricl",  # common typo
     "switchgear", "switchboard", "panelboard", "panel board",
-    "conduit", "wire ", "wiring", "cabling", "cable ",
-    "transformer", "generator", "ups ", "battery backup",
     "fire alarm", "fa system",
-    "security system", "cctv", "surveillance", "access control",
-    "low voltage", " lv ", "low-voltage",
-    "av ", "audio video", "audio-visual", "audiovisual",
+    "low voltage", "low-voltage",
+    "photovoltaic", "solar pv", " pv ",
+    "ev charg", "ev station",
+    "transformer", "standby generator", "standby power",
+    "c10", "c-10", "c 10", "class c-10", "electrical contractor",
+    "lighting upgrade", "lighting retrofit", "lighting replacement",
+    "raceway", "branch circuit",
+    "audio video", "audio-visual", "audiovisual",
     "nurse call", "hospital communications",
-    "photovoltaic", "solar pv", " pv ", "ev charg", "ev station",
-    "arc fault", "gfci", "branch circuit", "feeder",
-    "raceway", "bonding", "grounding",
-    "voltage", "kv ", "high voltage", "medium voltage",
-    "c10", "c-10", "c 10",
-    "communications cabling", "structured cabling", "data center",
-    "csi 26", "csi 27", "csi 28", "div 26", "div 27", "div 28",
+    "controls upgrade", "controls retrofit",
+    "switchgear replacement",
+    "div 26", "div 27", "div 28", "csi 26", "csi 27", "csi 28",
     "division 26", "division 27", "division 28",
+    "ev infrastructure", "ev chargers",
+    "generator replacement", "generator install",
 ]
 
-# Buildings imply electrical even without keyword in title/description.
+# Weak positives: hint at electrical but commonly appear in non-electrical
+# contexts too (e.g. "wire" in fencing, "cable" in culverts, "voltage" in
+# nameplate trivia). Only count as electrical when no negative is present.
+ELECTRICAL_WEAK_POSITIVE = [
+    "lighting", "light fixture", "luminaire", "lamp ",
+    "conduit",
+    "wire ", "wiring", "cable ", "cabling",
+    "voltage", "kv ",
+    "generator",
+    "security system", "cctv", "surveillance", "access control",
+    "av ",
+    "structured cabling", "communications cabling", "data center",
+    "outlet", "panel ",
+    "arc fault", "gfci", "feeder",
+    "bonding", "grounding",
+]
+
+# Buildings imply electrical even without keyword. Same "weak" rule:
+# building + no negative -> electrical; building + negative -> not.
 BUILDING_KEYWORDS = [
     "fire station", "school", "library", "hospital", "clinic",
     "office building", "police station", "city hall",
     "community center", "senior center", "recreation center",
     "tenant improvement", "building renovation", "remodel",
-    "construction project", "new building",
+    "construction project", "new building", "new construction",
     "wtp", "water treatment plant", "lift station", "pump station",
 ]
 
 # Strong negatives: when the project is OBVIOUSLY not electrical work.
-# Single-line, lowercased, substring match.
+# These suppress weak positives and building keywords (but not strong positives).
 ELECTRICAL_NEGATIVE = [
     "paving project", "pavement", "asphalt", "slurry seal",
     "overlay project", "concrete overlay",
-    "fencing", "fence replacement", "tree removal", "tree trimming",
-    "roof replacement", "re-roof", "re roof",
-    "painting project", "pavement striping",
+    "fencing", "fence replacement", "fence ",
+    "tree removal", "tree trimming", "vegetation",
+    "roof replacement", "re-roof", "re roof", "roofing", "roof maintenance",
+    "painting project", "exterior painting", "interior painting",
+    "pavement striping", "striping",
     "guardrail", "guard rail",
     "tennis court", "playground equipment",
-    "creek bank", "channel repair",
-    "saw cutting", "sidewalk replacement",
+    "creek bank", "channel repair", "channel",
+    "saw cutting", "sidewalk replacement", "sidewalk",
     "janitorial",
-    "landscape maintenance",
-    "vegetation control",
-    "culvert",
+    "landscape", "landscaping", "landscape maintenance",
+    "culvert", "culvert replacement",
+    "fountain", "pond ",
+    "exterior repair",
+    "ada path", "ada parking",
+    "demolition only",
+    "rebar",
+    "fiberized slurry",
+    "concrete channel",
 ]
 
 C10_PATTERNS = [
