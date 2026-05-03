@@ -1,0 +1,42 @@
+name: Sync Quote Tracker (Gmail)
+
+# Replaces the local Gmail vendor-quote parsing pipeline. Runs every
+# 5 min, walks the ESTIMATING/CURRENT BIDS gmail labels, applies LLM
+# enrichment (cached in public.gmail_kv_cloud so most runs are free),
+# writes result to public.quote_tracker_cloud which the Bay Bid List
+# page reads.
+#
+# Required GitHub Secrets:
+#   GMAIL_TOKEN_JSON     -- contents of fusion-pm panel/scripts/gmail-token.json
+#   CLAUDE_API_KEY       -- Anthropic API key (optional; without it the
+#                            parser runs rule-based-only)
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-quote-tracker
+  cancel-in-progress: false
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt google-api-python-client google-auth-oauthlib anthropic
+      - name: Run parser -> Supabase
+        env:
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+        run: python parse-gmail-quotes.py --out /tmp/quote-tracker.html

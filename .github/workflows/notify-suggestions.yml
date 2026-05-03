@@ -1,0 +1,37 @@
+name: Notify Suggestions (Gmail)
+
+# Polls public.suggestions for new submissions + new resolutions and
+# emails the host via Gmail API. Replaces the local notify-suggestions
+# step in AutoUpdate-Task.
+#
+# Required GitHub Secrets:
+#   GMAIL_TOKEN_JSON  -- contents of fusion-pm panel/scripts/gmail-token.json
+#                        (refresh token + access token + scopes)
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: notify-suggestions
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt google-api-python-client google-auth-oauthlib
+      - name: Run notifier
+        env:
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+        run: python notify-suggestions.py
