@@ -266,7 +266,17 @@ def main():
         # Polite throttle between modes
         time.sleep(0.5)
 
-    print(f"\nTotal rows to upsert: {len(all_rows)}")
+    # Dedupe by id within the batch -- the same opsplannum can show up
+    # multiple times within one mode (e.g. multiple addenda packages share
+    # a project), and PostgREST UPSERT rejects same-key dupes in a single
+    # request with "ON CONFLICT DO UPDATE command cannot affect row a
+    # second time" (SQLSTATE 21000). Last write wins.
+    dedup = {}
+    for r in all_rows:
+        dedup[r["id"]] = r
+    all_rows = list(dedup.values())
+
+    print(f"\nTotal rows to upsert (after dedup): {len(all_rows)}")
     for m, n in per_mode_counts.items():
         print(f"  {m:>22}: {n}")
 
