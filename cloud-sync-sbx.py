@@ -192,6 +192,107 @@ def fetch_mode(opener, mode, *, page_limit, counties):
     return out
 
 
+# --- Scope classifier --------------------------------------------------------
+# Most SBX listings in our 4 counties are NOT electrical (paving, fencing,
+# roofing, etc.). Filter at ingest time so the watchlist tab stays signal-rich.
+# Keyword-based for now -- robust, fast, deterministic. If precision becomes
+# an issue we can layer a Claude call on the ambiguous middle.
+
+ELECTRICAL_POSITIVE = [
+    "electrical", "electric ", "electrician", "electricl",  # common typo
+    "lighting", "light fixture", "luminaire", "lamp ",
+    "switchgear", "switchboard", "panelboard", "panel board",
+    "conduit", "wire ", "wiring", "cabling", "cable ",
+    "transformer", "generator", "ups ", "battery backup",
+    "fire alarm", "fa system",
+    "security system", "cctv", "surveillance", "access control",
+    "low voltage", " lv ", "low-voltage",
+    "av ", "audio video", "audio-visual", "audiovisual",
+    "nurse call", "hospital communications",
+    "photovoltaic", "solar pv", " pv ", "ev charg", "ev station",
+    "arc fault", "gfci", "branch circuit", "feeder",
+    "raceway", "bonding", "grounding",
+    "voltage", "kv ", "high voltage", "medium voltage",
+    "c10", "c-10", "c 10",
+    "communications cabling", "structured cabling", "data center",
+    "csi 26", "csi 27", "csi 28", "div 26", "div 27", "div 28",
+    "division 26", "division 27", "division 28",
+]
+
+# Buildings imply electrical even without keyword in title/description.
+BUILDING_KEYWORDS = [
+    "fire station", "school", "library", "hospital", "clinic",
+    "office building", "police station", "city hall",
+    "community center", "senior center", "recreation center",
+    "tenant improvement", "building renovation", "remodel",
+    "construction project", "new building",
+    "wtp", "water treatment plant", "lift station", "pump station",
+]
+
+# Strong negatives: when the project is OBVIOUSLY not electrical work.
+# Single-line, lowercased, substring match.
+ELECTRICAL_NEGATIVE = [
+    "paving project", "pavement", "asphalt", "slurry seal",
+    "overlay project", "concrete overlay",
+    "fencing", "fence replacement", "tree removal", "tree trimming",
+    "roof replacement", "re-roof", "re roof",
+    "painting project", "pavement striping",
+    "guardrail", "guard rail",
+    "tennis court", "playground equipment",
+    "creek bank", "channel repair",
+    "saw cutting", "sidewalk replacement",
+    "janitorial",
+    "landscape maintenance",
+    "vegetation control",
+    "culvert",
+]
+
+C10_PATTERNS = [
+    r"\bc[\s\-]?10\b",
+    r"class\s+c[\s\-]?10",
+    r"electrical\s+contractor[s']?\s+license",
+]
+
+
+def classify_scope(project_name, description, owner):
+    """Return (is_electrical, requires_c10, signals_list)."""
+    import re
+    blob = " ".join(filter(None, [project_name or "", description or "", owner or ""])).lower()
+
+    signals = []
+    pos_hit = False
+    for kw in ELECTRICAL_POSITIVE:
+        if kw in blob:
+            signals.append(f"+{kw.strip()}")
+            pos_hit = True
+    bldg_hit = False
+    for kw in BUILDING_KEYWORDS:
+        if kw in blob:
+            signals.append(f"~{kw}")
+            bldg_hit = True
+    neg_hit = False
+    for kw in ELECTRICAL_NEGATIVE:
+        if kw in blob:
+            signals.append(f"-{kw}")
+            neg_hit = True
+
+    # Decision:
+    #   strong-positive (any electrical keyword) -> electrical regardless of negatives
+    #   building keyword + no negative -> probably electrical (new build / reno)
+    #   otherwise -> not electrical
+    if pos_hit:
+        is_electrical = True
+    elif bldg_hit and not neg_hit:
+        is_electrical = True
+    else:
+        is_electrical = False
+
+    requires_c10 = any(re.search(p, blob, re.IGNORECASE) for p in C10_PATTERNS)
+
+    # Cap signal list to keep storage compact.
+    return is_electrical, requires_c10, signals[:20]
+
+
 def to_row(mode, p):
     """Map an SBX raw record to a Supabase row."""
     def _strip(v):
@@ -213,6 +314,8 @@ def to_row(mode, p):
         return None
     project_link = _strip(p.get("ProjectLink")) or ""
     full_link = f"{SBX_BASE}/{project_link.lstrip('/')}" if project_link else ""
+    is_electrical, requires_c10, signals = classify_scope(
+        _strip(p.get("projectname")), _strip(p.get("description")), _strip(p.get("owner")))
     return {
         "id":               f"{mode}::{plannum}",
         "mode":             mode,
@@ -231,6 +334,9 @@ def to_row(mode, p):
         "doc_status":       p.get("DocStatus"),
         "total_bid_packages": p.get("TotalBidPackages"),
         "postponed":        bool(p.get("postponed") or False),
+        "is_electrical":    is_electrical,
+        "requires_c10":     requires_c10,
+        "scope_signals":    signals,
         "payload":          p,
         "generated_at":     datetime.utcnow().isoformat() + "Z",
         "updated_at":       datetime.utcnow().isoformat() + "Z",
