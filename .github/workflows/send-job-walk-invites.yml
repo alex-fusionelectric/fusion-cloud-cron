@@ -1,0 +1,38 @@
+name: Send Job Walk Calendar Invites
+
+# Walks bids_cloud for active bids whose JOB WALK column has a real
+# datetime, sends Alex (+ estimator + PE) an .ics calendar invite via
+# Gmail. De-dup table public.job_walk_invites_sent_cloud prevents
+# repeats; rescheduling JOB WALK auto-mints a new invite.
+#
+# Required secrets: GMAIL_TOKEN_JSON, GMAIL_FROM, SUPABASE_SERVICE_KEY
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: send-job-walk-invites
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install google-api-python-client google-auth-oauthlib
+      - name: Send invites
+        env:
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python send-job-walk-invites.py
