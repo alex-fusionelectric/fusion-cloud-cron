@@ -95,6 +95,43 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 # vendor reply.
 USER_DOMAIN = "fusionelectric-inc.com"
 
+# General contractor + bid-platform domains. Inbound from these is the GC
+# asking us to bid (or following up about one) -- NOT a vendor giving us
+# prices. Dropping their threads from the quote tracker prevents false
+# "vendor" rows like the Streamline Construction example (Alex 2026-05-04:
+# "this is the GC not a vendor").
+#
+# This list is UNION'd with a dynamic set built at runtime from
+# bid_invitations.sender_email (every domain that has ever sent us a bid
+# invitation is, by definition, a GC or a bid platform).
+GC_PLATFORM_DOMAINS_STATIC = {
+    # GC domains observed in real bid invitations (extend as more arrive)
+    "streamlineconstruction.net",
+    "envisioncdi.com",
+    "sbayconstruction.com",
+    "dlfalk.com",
+    "winspearconstruction.com",
+    "swinerton.com",
+    "truebeck.com",
+    "dpr.com",
+    "webcor.com",
+    "mccarthy.com",
+    "level10gc.com",
+    "hathaway-dinwiddie.com",
+    "novocon.com",
+    "cumming-group.com",
+    # Bid platforms that route GC invitations on behalf of many agencies
+    "buildingconnected.com",
+    "publicpurchase.com",
+    "bidnet.com",
+    "smartbidnet.com",
+    "com2.smartbidnet.com",
+    "yourced.com",
+    "questcdn.com",
+    "ebidboard.com",
+    "ebidexchange.com",
+}
+
 # Scope vocabulary — same buckets the BAY Bid List page renders. Order is
 # fall-through priority: longer/more-specific keywords win.
 SCOPE_RULES = [
@@ -295,6 +332,63 @@ def parse_sender(raw):
 
 def is_outbound(addr):
     return bool(addr) and addr.endswith("@" + USER_DOMAIN)
+
+
+def _domain_of(addr: str) -> str:
+    """Lowercase domain from an email address (after @). Empty if invalid."""
+    if not addr or "@" not in addr:
+        return ""
+    return addr.split("@", 1)[1].strip().lower()
+
+
+# Populated at startup by load_dynamic_gc_domains().
+GC_DYNAMIC_DOMAINS: set[str] = set()
+
+
+def load_dynamic_gc_domains() -> set[str]:
+    """Read every sender_email from bid_invitations where is_invitation=true
+    and extract domains. These are by definition GCs/platforms (they sent
+    us a bid invitation). Cached in module-global GC_DYNAMIC_DOMAINS."""
+    global GC_DYNAMIC_DOMAINS
+    if GC_DYNAMIC_DOMAINS:
+        return GC_DYNAMIC_DOMAINS
+    try:
+        url = (f"{SUPABASE_URL}/rest/v1/bid_invitations"
+               f"?select=sender_email,sender_org&is_invitation=eq.true&limit=2000")
+        req = urllib.request.Request(url, headers={
+            "apikey": _service_key(),
+            "Authorization": f"Bearer {_service_key()}",
+        })
+        with urllib.request.urlopen(req, timeout=20) as r:
+            rows = json.loads(r.read())
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] couldn't load dynamic GC domains: {e}")
+        return GC_DYNAMIC_DOMAINS
+    domains = set()
+    for r in rows:
+        d = _domain_of(r.get("sender_email") or "")
+        if d:
+            domains.add(d)
+    GC_DYNAMIC_DOMAINS = domains
+    return domains
+
+
+def is_gc_or_platform(addr: str) -> bool:
+    """True if the sender's domain is a known GC or a bid-routing platform.
+    Threads from these senders are bid invitations / GC follow-ups, not
+    vendor quotes."""
+    d = _domain_of(addr)
+    if not d:
+        return False
+    if d in GC_PLATFORM_DOMAINS_STATIC:
+        return True
+    if d in GC_DYNAMIC_DOMAINS:
+        return True
+    # Heuristic: subdomains of known platforms (e.g. "noreply.buildingconnected.com")
+    for known in GC_PLATFORM_DOMAINS_STATIC:
+        if d.endswith("." + known):
+            return True
+    return False
 
 
 def parse_internal_date(msg):
@@ -614,6 +708,15 @@ def parse_thread(thread, today, bid_due_dates_by_num, project_number):
     if not vendor_email:
         # Not enough signal to call it a vendor thread.
         return None, "no vendor identified"
+
+    # GC vs vendor classification. If the inbound sender's domain matches
+    # a known GC or bid platform, this is the GC asking us to bid (or
+    # following up on the bid) -- NOT a vendor providing prices. Skip
+    # the thread so the vendor quote tracker doesn't surface them as
+    # vendors (Alex 2026-05-04: Streamline Construction was rendering
+    # as a vendor under 26-236 UCSF CT REPLACEMENT).
+    if is_gc_or_platform(vendor_email):
+        return None, f"sender is GC/platform ({_domain_of(vendor_email)})"
 
     scope = bucket_scope(request_subject)
 
@@ -1299,6 +1402,17 @@ def main():
 
     bid_due_dates = load_bids_due_dates()
     print(f"Loaded {len(bid_due_dates)} bid due dates from portal data.")
+
+    # Pre-load known GC / bid-platform domains. Threads whose inbound
+    # sender comes from one of these are bid invitations / GC follow-ups,
+    # not vendor quotes -- parse_thread will skip them.
+    if os.environ.get("SUPABASE_SERVICE_KEY"):
+        gc_dyn = load_dynamic_gc_domains()
+        print(f"Loaded {len(gc_dyn)} dynamic GC/platform domains from "
+              f"bid_invitations (+ {len(GC_PLATFORM_DOMAINS_STATIC)} static).")
+    else:
+        print(f"No SUPABASE_SERVICE_KEY -- using static GC list only "
+              f"({len(GC_PLATFORM_DOMAINS_STATIC)} domains).")
 
     # Optional Claude enrichment — gate on API key + library + flag.
     claude = None if args.skip_llm else get_anthropic_client()
