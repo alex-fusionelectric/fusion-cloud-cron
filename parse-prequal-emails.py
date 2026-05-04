@@ -119,10 +119,25 @@ Return ONLY a JSON object (no prose, no markdown). Use null when unknown.
   "approval_amount": 1465800.00 (numeric dollar limit if stated) or null,
   "application_number": "977391" or null,
   "approval_date": "YYYY-MM-DD" or null,
-  "expiration_date": "YYYY-MM-DD" or null  (compute as approval+1yr if not stated but typical-1-year language present),
+  "expiration_date": "YYYY-MM-DD" or null,
   "notes": "Kim's commentary in her forwarded message (skip the legal boilerplate)" or null,
   "signals": ["short phrases that drove your classification"]
 }}
+
+CRITICAL RULES for date fields:
+1. approval_date: ONLY return a date if the email explicitly states the
+   prequal was approved on that date (e.g. "approved on 5/4/2025",
+   "approval issued: May 4, 2025"). DO NOT extract dates from quoted reply
+   chains, signature lines, or unrelated context (a "On Fri, May 2..." line
+   is the date someone else wrote a message, NOT the approval date). When
+   in doubt, return null -- the caller fills it in from the email's
+   received-at timestamp.
+2. expiration_date: ONLY return a date if the email explicitly mentions an
+   expiration / "valid until" / "good through" date. DO NOT compute an
+   expiration from approval_date. DO NOT assume "typical 1 year" or any
+   default duration. If no expiration is stated, return null. A null
+   expiration means "indefinite / not stated" -- the UI must NOT mark such
+   prequals as "expired".
 
 EMAIL:
 Subject: {subject}
@@ -238,7 +253,18 @@ def main():
             continue
 
         received_ms = int(full.get("internalDate", 0))
-        received_iso = dt.datetime.utcfromtimestamp(received_ms / 1000).isoformat() + "Z" if received_ms else None
+        received_dt = dt.datetime.utcfromtimestamp(received_ms / 1000) if received_ms else None
+        received_iso = received_dt.isoformat() + "Z" if received_dt else None
+
+        # Fallback: if Claude couldn't find an explicit approval date in
+        # the body (which is correct per the prompt's rules), use the
+        # email's received-at date instead. This avoids the prior bug where
+        # Claude was inventing dates from quoted thread chains.
+        approval_date = ext.get("approval_date")
+        status_lower = (ext.get("status") or "").lower()
+        if not approval_date and status_lower in ("approved", "renewed") and received_dt:
+            approval_date = received_dt.strftime("%Y-%m-%d")
+
         rows.append({
             "id":               m["id"],
             "agency_name":      (ext.get("agency_name") or "").strip()[:300] or "Unknown",
@@ -246,8 +272,8 @@ def main():
             "status":           (ext.get("status") or "approved")[:30],
             "approval_amount":  ext.get("approval_amount"),
             "application_number": (ext.get("application_number") or None),
-            "approval_date":    ext.get("approval_date"),
-            "expiration_date":  ext.get("expiration_date"),
+            "approval_date":    approval_date,
+            "expiration_date":  ext.get("expiration_date"),  # null when not explicitly stated
             "notes":            (ext.get("notes") or "")[:1000],
             "source_subject":   subject[:500],
             "source_from":      sender_addr[:200],
