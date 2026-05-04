@@ -1,0 +1,38 @@
+name: Send bid-emails review digest
+
+# Daily digest of bid-label emails that the addenda detector flagged as
+# 'review_needed' (didn't match any scope-change pattern, not from Fusion,
+# no attachments). Alex gets one email each morning listing what landed
+# overnight that needs a human eyeball.
+#
+# Runs at 06:30 PT every weekday (= 13:30 UTC PST / 14:30 UTC PDT;
+# we use 14:00 UTC year-round which is 06:00 PST / 07:00 PDT -- close
+# enough to "first thing in the morning").
+
+on:
+  schedule:
+    - cron: "0 14 * * 1-5"
+  workflow_dispatch: {}
+
+concurrency:
+  group: send-bid-emails-review-digest
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Send digest
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
+          ALERT_TO_EMAIL: alex@fusionelectric-inc.com
+        run: python send-bid-emails-review-digest.py

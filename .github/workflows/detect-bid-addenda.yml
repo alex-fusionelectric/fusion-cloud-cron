@@ -1,0 +1,41 @@
+name: Detect bid addenda
+
+# Mission-critical: scans every active bid's Gmail label + Dropbox PLANS &
+# SPECS folder for addenda. Reconciles findings, emails Alex on every NEW
+# addendum detected, and flags single-source detections as "needs manual
+# reconcile" (e.g. addendum email arrived but the file isn't filed yet).
+#
+# Runs every 30 minutes. Faster than that risks Gmail API rate limits at
+# the per-user-per-second tier; slower means addenda might sit unnoticed
+# for an hour, which is risky on bid day.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: detect-bid-addenda
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Detect addenda
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          ALERT_TO_EMAIL: alex@fusionelectric-inc.com
+        run: python detect-bid-addenda.py

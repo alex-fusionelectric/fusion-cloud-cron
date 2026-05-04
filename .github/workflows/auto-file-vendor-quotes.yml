@@ -1,0 +1,37 @@
+name: Auto-file vendor quotes
+
+# Pulls vendor-quote attachments from each active bid's Gmail label and
+# uploads them into <bid_folder>/QUOTES/. Idempotent via quote_files_cloud
+# (keyed on message_id + attachment_id).
+#
+# Runs every 15 minutes during business hours; idle outside business hours
+# to save GitHub Actions minutes.
+
+on:
+  schedule:
+    - cron: "*/15 13-23 * * 1-5"   # M-F 13:00-23:59 UTC = 06:00-16:59 PT
+  workflow_dispatch: {}
+
+concurrency:
+  group: auto-file-vendor-quotes
+  cancel-in-progress: false
+
+jobs:
+  file:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: File vendor quotes
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+        run: python auto-file-vendor-quotes.py
