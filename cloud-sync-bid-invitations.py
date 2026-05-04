@@ -301,6 +301,20 @@ def main():
         if not ext.get("is_invitation"):
             continue
 
+        # Skip out-of-state invitations. Fusion Electric bids only in
+        # California. If the extracted location explicitly names another
+        # US state, it's not a bid we'd pursue. Per Alex 2026-05-04:
+        # "maybe not suggest out of state also".
+        _loc = (ext.get("location") or "").upper()
+        _OUT_OF_STATE = re.compile(
+            r"\b(ID|TX|OR|WA|AZ|UT|CO|NM|MT|WY|FL|NY|GA|IL|OH|PA|NC|"
+            r"VA|MA|MD|MI|MN|NV|HI|AK|IN|WI|MO|TN|AL|SC|KY|OK|AR|IA|"
+            r"KS|MS|NE|SD|ND|VT|NH|ME|DE|RI|WV|DC)\b"
+        )
+        if _loc and _OUT_OF_STATE.search(_loc) and "CA" not in _loc and "CALIFORNIA" not in _loc:
+            print(f"  [skip] out-of-state location: {ext.get('location')!r}")
+            continue
+
         # Skip past-due invitations -- the Bay PowerBid Bid Radar tab is
         # forward-looking; archived ones live in the original Sent labels.
         bid_due = ext.get("bid_due_date")
