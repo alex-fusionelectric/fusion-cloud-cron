@@ -102,16 +102,17 @@ def sb_get(path: str) -> list:
         return json.loads(r.read())
 
 
-def sb_patch_bulk_dismiss(ids: Iterable[str]) -> int:
-    """Set is_invitation=false on the given ids. Done in chunks because
-    PostgREST URL filters get unwieldy past ~50 ids."""
-    ids = list(ids)
-    if not ids:
+def sb_patch_bulk_dismiss(id_to_est: dict) -> int:
+    """Set is_invitation=false on the given invitation ids.
+    id_to_est: {invitation_id: est_number} — est_number logged but not
+    written to DB (bid_invitations has no est_number column yet).
+    Done in chunks of 50."""
+    if not id_to_est:
         return 0
+    ids = list(id_to_est.keys())
     sent = 0
     for i in range(0, len(ids), 50):
         chunk = ids[i:i + 50]
-        # PostgREST: id=in.(a,b,c)
         in_clause = ",".join(urllib.parse.quote(x, safe="") for x in chunk)
         url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}?id=in.({in_clause})"
         body = json.dumps({"is_invitation": False}).encode("utf-8")
@@ -182,7 +183,10 @@ def main() -> int:
         matched = thread_label_ids & est_label_ids
         if matched:
             label_name = label_id_to_name.get(next(iter(matched)), "?")
-            to_dismiss.append((r["id"], thread_id, label_name))
+            # Extract EST# from label name e.g. "ESTIMATING/CURRENT BIDS/26-221 SHC..."
+            est_match = re.match(r".*?(\d{2}-\d{3,4})\b", label_name)
+            est_num = est_match.group(1) if est_match else ""
+            to_dismiss.append((r["id"], thread_id, label_name, est_num))
         else:
             skipped_unhandled += 1
 
@@ -193,8 +197,8 @@ def main() -> int:
     if to_dismiss:
         print()
         print("Sample of what's being dismissed:")
-        for inv_id, tid, ln in to_dismiss[:15]:
-            print(f"  - {inv_id[:20]:<22} thread={tid[:20]:<22} via label='{ln}'")
+        for inv_id, tid, ln, est in to_dismiss[:15]:
+            print(f"  - {inv_id[:20]:<22} thread={tid[:20]:<22} est={est:<8} via label='{ln}'")
         if len(to_dismiss) > 15:
             print(f"  ... and {len(to_dismiss) - 15} more")
 
@@ -203,7 +207,8 @@ def main() -> int:
         print("[--dry-run] No DB writes performed.")
         return 0
 
-    written = sb_patch_bulk_dismiss([t[0] for t in to_dismiss])
+    id_to_est = {t[0]: t[3] for t in to_dismiss}
+    written = sb_patch_bulk_dismiss(id_to_est)
     print(f"\nDismissed {written}/{len(to_dismiss)} invitation(s) in Supabase.")
     return 0
 
