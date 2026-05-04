@@ -155,21 +155,144 @@ def _sb(method, path, body=None, extra=None, timeout=30):
         return e.code, e.read()
 
 
-def fetch_active_bids() -> list[dict]:
+_EST_LABEL_RX = re.compile(r"^ESTIMATING/CURRENT BIDS/(\d{2}-\d{3,4})\b", re.IGNORECASE)
+_EST_FOLDER_RX = re.compile(r"^EST#\s*(\d{2}-\d{3,4})\b", re.IGNORECASE)
+
+
+def build_est_to_gmail_label_map(svc) -> dict[str, str]:
+    """{est_number_upper: full label name} for every Gmail label that
+    looks like 'ESTIMATING/CURRENT BIDS/YY-NNN ...'. Used to resolve
+    gmail_label for active bids that don't have one on the prebid row."""
+    out: dict[str, str] = {}
+    try:
+        result = svc.users().labels().list(userId="me").execute()
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] gmail labels.list failed: {e}")
+        return out
+    for L in result.get("labels", []) or []:
+        m = _EST_LABEL_RX.match(L.get("name") or "")
+        if m:
+            out[m.group(1).upper()] = L["name"]
+    return out
+
+
+def build_est_to_dropbox_folder_map(dbx) -> dict[str, str]:
+    """{est_number_upper: '/Fusion Electric Folder/02- ESTIMATING/EST# YY-NNN ...'}.
+    Used to resolve dropbox_folder for active bids that don't have one on
+    the prebid row. Listing the estimating root once is cheap (~30 entries)."""
+    out: dict[str, str] = {}
+    EST_ROOT = "/Fusion Electric Folder/02- ESTIMATING"
+    try:
+        listing = dbx.files_list_folder(EST_ROOT, recursive=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] dropbox list {EST_ROOT} failed: {e}")
+        return out
+    while True:
+        for entry in listing.entries:
+            if not hasattr(entry, "path_display"):
+                continue
+            # FolderMetadata only (skip files)
+            if entry.__class__.__name__ != "FolderMetadata":
+                continue
+            m = _EST_FOLDER_RX.match(entry.name or "")
+            if m:
+                out[m.group(1).upper()] = entry.path_display
+        if not getattr(listing, "has_more", False):
+            break
+        try:
+            listing = dbx.files_list_folder_continue(listing.cursor)
+        except Exception:
+            break
+    return out
+
+
+# Status values that count as "active" in bids_cloud (mirrors what the
+# frontend gates on -- BIDDING + the various BID OR BAIL / FOLLOW UP /
+# SENT / PENDING flags. Outcome-closed bids are filtered separately.)
+_ACTIVE_STATUS_VALUES = ("BIDDING", "BID OR BAIL", "SENT", "FOLLOW UP",
+                         "FOLLOW UPS", "PENDING")
+
+
+def fetch_active_bids(gmail_svc=None, dbx=None) -> list[dict]:
+    """Active bids the addenda detector should scan. Two sources:
+
+    1. prebid_bids_cloud rows (recent setups via Bay PowerBid) -- they
+       carry gmail_label + dropbox_folder directly on the row.
+    2. bids_cloud rows (canonical BID LIST, includes older setups that
+       predate the prebid pipeline). gmail_label and dropbox_folder are
+       NOT stored on these rows, so we resolve them by EST# prefix
+       against Gmail labels and the Dropbox /02- ESTIMATING/ folder.
+
+    Source 2 is gated on gmail_svc + dbx being provided. If they're None,
+    we fall back to source 1 only (the legacy behavior)."""
+    out: list[dict] = []
+    seen_ests: set[str] = set()
+
+    # --- Source 1: prebid_bids_cloud (existing behavior) ---
     qs = ("select=id,est_number,project_name,gmail_label,dropbox_folder,notes,"
           "client_gc,project_engineer,bid_due_date,updated_at"
           "&order=updated_at.desc&limit=200")
     st, body = _sb("GET", f"prebid_bids_cloud?{qs}")
     if st != 200:
-        raise SystemExit(f"prebid_bids_cloud GET failed: HTTP {st} {body[:200]!r}")
-    out = []
-    for r in json.loads(body):
-        notes = (r.get("notes") or "").lower()
-        if "local_helper:skip" in notes:  # cancelled
+        print(f"[warn] prebid_bids_cloud GET failed: HTTP {st} {body[:200]!r}")
+    else:
+        for r in json.loads(body):
+            notes = (r.get("notes") or "").lower()
+            if "local_helper:skip" in notes:
+                continue
+            if not r.get("gmail_label") or not r.get("dropbox_folder"):
+                continue
+            est = (r.get("est_number") or "").upper().strip()
+            if est:
+                seen_ests.add(est)
+            out.append(r)
+
+    # --- Source 2: bids_cloud (canonical BID LIST) ---
+    if gmail_svc is None or dbx is None:
+        return out
+    print("Resolving gmail_label / dropbox_folder for active BID LIST bids...")
+    label_map = build_est_to_gmail_label_map(gmail_svc)
+    folder_map = build_est_to_dropbox_folder_map(dbx)
+    print(f"  {len(label_map)} EST# Gmail labels, {len(folder_map)} EST# Dropbox folders found.")
+
+    status_in = ",".join(urllib.parse.quote(s, safe="") for s in _ACTIVE_STATUS_VALUES)
+    qs2 = (f"select=est_number,project_name,client_gc,project_engineer,"
+           f"bid_due_date,status,outcome"
+           f"&status=in.({status_in})&limit=600")
+    st2, body2 = _sb("GET", f"bids_cloud?{qs2}")
+    if st2 != 200:
+        print(f"[warn] bids_cloud GET failed: HTTP {st2} {body2[:200]!r}")
+        return out
+    extra = 0
+    for r in json.loads(body2):
+        outcome = (r.get("outcome") or "").lower()
+        if outcome in ("awarded", "not awarded"):
             continue
-        if not r.get("gmail_label") or not r.get("dropbox_folder"):
-            continue  # nothing to scan
-        out.append(r)
+        est = (r.get("est_number") or "").upper().strip()
+        if not est or est in seen_ests:
+            continue
+        gl = label_map.get(est)
+        df = folder_map.get(est)
+        if not gl or not df:
+            # Either Gmail label or Dropbox folder missing -- can't scan.
+            # Common when a bid is in BID LIST but never had its email
+            # thread labeled OR its folder set up via the auto-pipeline.
+            continue
+        out.append({
+            "id": f"BID_LIST_{est}",
+            "est_number": est,
+            "project_name": r.get("project_name"),
+            "gmail_label": gl,
+            "dropbox_folder": df,
+            "notes": "",
+            "client_gc": r.get("client_gc"),
+            "project_engineer": r.get("project_engineer"),
+            "bid_due_date": r.get("bid_due_date"),
+            "updated_at": None,
+        })
+        seen_ests.add(est)
+        extra += 1
+    print(f"  +{extra} active bid(s) added from bids_cloud (total now {len(out)}).")
     return out
 
 
@@ -518,7 +641,7 @@ def main():
     svc = gmail_service()
     dbx = dropbox_client()
 
-    bids = fetch_active_bids()
+    bids = fetch_active_bids(gmail_svc=svc, dbx=dbx)
     print(f"{len(bids)} active bid(s) with gmail_label + dropbox_folder")
 
     new_for_email: list[dict] = []
