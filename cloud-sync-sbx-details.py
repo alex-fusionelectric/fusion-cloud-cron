@@ -244,7 +244,9 @@ def try_planholder_endpoints(opener, bid_package_id, opsplannum):
                 continue
             # Heuristic: we want a page that mentions multiple companies / "holder" / "bidder"
             l = html.lower()
-            if any(kw in l for kw in ("plan holder", "planholder", "bidder list", "bidders list", "registered companies", "registered bidder")):
+            if any(kw in l for kw in ("plan holder", "planholder", "bidder list",
+                                       "bidders list", "registered companies",
+                                       "registered bidder", "general contractor")):
                 return url, html
         except (urllib.error.HTTPError, urllib.error.URLError):
             continue
@@ -284,8 +286,41 @@ def parse_detail(html):
         "addenda_list": [],
         "doc_count": 0,
         "doc_list": [],
+        "plan_holders": [],   # extracted from GC table on main detail page
         "warnings": [],
     }
+
+    # Extract plan holders / GC table from main detail page.
+    # SBX embeds the bidder/plan-holder table directly on filter.aspx.
+    # Table header = "General Contractor" (or "Plan Holders"); rows have:
+    #   company name (may end with * = confirmed), email, Ph:xxx, City ST
+    gc_table_rx = re.compile(
+        r"(?:General\s+Contractor|Plan\s+Holders?|Bidder[s]?\s+List)"
+        r".*?</tr>(.*?)(?:</table>|<table)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    gc_match = gc_table_rx.search(html)
+    if gc_match:
+        tr_pat2 = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+        td_pat2 = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
+        for tr in tr_pat2.findall(gc_match.group(1)):
+            cells = [collapse_ws(unescape(strip_tags(c))) for c in td_pat2.findall(tr)]
+            if not cells: continue
+            name = cells[0].rstrip(" *").strip()
+            if not name or len(name) < 3 or len(name) > 150: continue
+            if not re.search(r"[A-Za-z]", name): continue
+            confirmed = cells[0].strip().endswith("*")
+            email = next((c for c in cells if "@" in c and "." in c), None)
+            phone_raw = next((c for c in cells if re.search(r"\d{3}[\s.(/-]?\d{3}", c)), None)
+            phone = re.sub(r"^Ph:\s*", "", phone_raw or "").strip() if phone_raw else None
+            city_cell = cells[-1] if len(cells) >= 3 else None
+            out["plan_holders"].append({
+                "name": name,
+                "confirmed": confirmed,
+                "email": email,
+                "phone": phone,
+                "city": city_cell,
+            })
 
     text = collapse_ws(strip_tags(html))
 
@@ -452,10 +487,20 @@ def main():
     print(f"SBX details scrape: limit={limit} discovery={discovery} min_interval_min={min_interval}")
     started = time.time()
 
-    listings = fetch_setup_listings(limit * 3)  # only opsplannums Alex has SET UP
-    print(f"  candidate setup listings: {len(listings)}")
+    # Fetch ALL future SBX listings (not just ones Alex set up) so we
+    # monitor every active project for addenda + bid date + bidder changes.
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    st_l, body_l = _sb("GET",
+        f"sbx_listings_cloud?select=opsplannum,bid_package_id,project_name,bid_date"
+        f"&bid_date=gte.{today_iso}&order=bid_date.asc&limit={limit * 3}")
+    all_listings_raw = json.loads(body_l) if st_l == 200 else []
+    seen_pn = {}
+    for r in all_listings_raw:
+        seen_pn.setdefault(r["opsplannum"], r)
+    listings = list(seen_pn.values())
+    print(f"  candidate active SBX listings (future bid date): {len(listings)}")
     if not listings:
-        print("  no set-up SBX bids to scrape, exiting.")
+        print("  no active SBX listings to scrape, exiting.")
         return
 
     recent = fetch_recent_detail_fetches()
@@ -540,7 +585,7 @@ def main():
             "project_duration":       parsed.get("project_duration"),
             "addenda_count":          parsed.get("addenda_count") or 0,
             "addenda_list":           parsed.get("addenda_list") or [],
-            "bidder_count":           len(holders),
+            "bidder_count":           len(holders) or len(parsed.get("plan_holders") or []),
             "raw_html":               html if discovery else None,
             "raw_planholder_html":    ph_html if discovery else None,
             "parse_warnings":         parsed.get("warnings") or [],
@@ -549,7 +594,26 @@ def main():
         }
         detail_rows.append(detail_row)
 
-        for h in holders:
+        # Merge plan holders from detail page + separate planholder page
+        all_holders = list(holders)
+        detail_phs = parsed.get("plan_holders") or []
+        seen_ph_names = {normalize_gc(h["name"]) for h in all_holders}
+        for ph in detail_phs:
+            nm = normalize_gc(ph["name"])
+            if nm and nm not in seen_ph_names:
+                all_holders.append({
+                    "name": ph["name"],
+                    "contact_phone": ph.get("phone"),
+                    "contact_email": ph.get("email"),
+                    "city": ph.get("city"),
+                    "role": "GC",
+                    "doc_count": 0,
+                })
+                seen_ph_names.add(nm)
+        if detail_phs:
+            print(f"  +{len(detail_phs)} GCs from detail page ({len(all_holders)} total)")
+
+        for h in all_holders:
             nm_norm = normalize_gc(h["name"])
             if not nm_norm:
                 continue

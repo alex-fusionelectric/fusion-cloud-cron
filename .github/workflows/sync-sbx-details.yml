@@ -11,7 +11,9 @@ name: Sync SBX project details (bidder list + addenda)
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # Daily at 7 AM UTC (midnight PT) — monitors all active bids for
+    # addenda changes, bid date shifts, and new plan holders.
+    - cron: "0 7 * * *"
   workflow_dispatch:
     inputs:
       discovery:
