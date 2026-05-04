@@ -1,0 +1,37 @@
+name: Dismiss already-set-up bid invitations
+
+# Walks pending bid_invitations and flips is_invitation=false on rows
+# whose Gmail thread already carries an EST# label
+# (ESTIMATING/CURRENT BIDS/YY-NNN ...). The EST# label is the canonical
+# "this bid is set up" signal -- way more reliable than fuzzy name
+# matching against BID LIST.
+#
+# Schedule: every 30 min. Light load: ~30 invitations to check, one
+# Gmail threads.get per invitation = ~15 sec total. Free-tier safe.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: dismiss-set-up-invitations
+  cancel-in-progress: false
+
+jobs:
+  dismiss:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Walk invitations + dismiss those with EST# labels
+        env:
+          GMAIL_TOKEN_JSON:     ${{ secrets.GMAIL_TOKEN_JSON }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python dismiss-set-up-invitations.py
