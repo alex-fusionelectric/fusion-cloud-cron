@@ -296,6 +296,113 @@ def fetch_active_bids(gmail_svc=None, dbx=None) -> list[dict]:
     return out
 
 
+# --- SBX listing cross-reference -------------------------------------------
+
+# Stopwords for the fuzzy project-name match between bid_name and SBX
+# project_name. Same shape as the Bid Radar dedup matcher (Build 49) so
+# behavior is consistent across the codebase.
+_SBX_STOPWORDS = {
+    "REBID", "PHASE", "PROJECT", "PROPOSAL", "WORK", "WORKS",
+    "ELECTRICAL", "BUILDING", "BUILD", "FACILITY", "FACILITIES",
+    "RENOVATION", "RENOVATE", "REPAIR", "REPAIRS", "REPLACEMENT",
+    "UPGRADE", "MODERNIZATION", "REFRESH", "SERVICE", "SERVICES",
+    "PROVIDE", "INSTALL", "INSTALLATION", "MAINTENANCE",
+    "WITH", "FROM", "INTO", "FOR", "AND", "THE", "CITY",
+}
+
+
+def _sig_tokens(s: str) -> set[str]:
+    out: set[str] = set()
+    norm = re.sub(r"[^A-Za-z0-9 ]+", " ", (s or "").upper())
+    for t in norm.split():
+        if len(t) >= 4 and t not in _SBX_STOPWORDS:
+            out.add(t)
+    return out
+
+
+def _parse_addenda_count(raw) -> int:
+    """SBX scrape stores addenda as a string with trailing whitespace
+    ("4                                                 "). Parse to int.
+    Returns 0 on any unparseable value (no addenda)."""
+    if raw is None:
+        return 0
+    s = str(raw).strip()
+    if not s:
+        return 0
+    try:
+        return int(s)
+    except ValueError:
+        return 0
+
+
+def fetch_sbx_listings_index() -> tuple[dict[str, dict], list[dict]]:
+    """Return (by_id, all_rows). by_id is keyed by sbx_listings_cloud.id
+    so prebid_bids_cloud.sbx_id can resolve directly. all_rows is the full
+    list for fuzzy project_name matching when no direct sbx_id exists."""
+    qs = "select=id,opsplannum,project_name,bid_date,payload&order=updated_at.desc&limit=2000"
+    st, body = _sb("GET", f"sbx_listings_cloud?{qs}")
+    if st != 200:
+        print(f"[warn] sbx_listings_cloud GET failed: HTTP {st}")
+        return {}, []
+    rows = json.loads(body)
+    return {r["id"]: r for r in rows}, rows
+
+
+def find_sbx_for_bid(bid: dict, sbx_by_id: dict, sbx_all: list[dict]) -> dict | None:
+    """Match an active bid to its SBX listing. Two strategies:
+
+    1. Direct: prebid_bids_cloud.sbx_listing.id (or .opsplannum) carried
+       on the bid dict points to the SBX row.
+    2. Fuzzy: token-overlap (>= 2 unique tokens, >= 60% of bid's tokens)
+       between bid.project_name and sbx_listings_cloud.project_name.
+
+    Returns the SBX row (dict) or None.
+    """
+    # Strategy 1: direct lookup
+    sl = bid.get("sbx_listing")
+    if isinstance(sl, dict):
+        sid = sl.get("id")
+        if sid and sid in sbx_by_id:
+            return sbx_by_id[sid]
+        ops = (sl.get("opsplannum") or "").strip().upper()
+        if ops:
+            for r in sbx_all:
+                if (r.get("opsplannum") or "").strip().upper() == ops:
+                    return r
+
+    # Strategy 2: fuzzy project_name match
+    bid_pn = bid.get("project_name") or ""
+    bid_toks = _sig_tokens(bid_pn)
+    if len(bid_toks) < 2:
+        return None
+    best = None
+    best_common = 0
+    for r in sbx_all:
+        sbx_toks = _sig_tokens(r.get("project_name") or "")
+        if len(sbx_toks) < 2:
+            continue
+        common = bid_toks & sbx_toks
+        if len(common) >= 2:
+            ratio_a = len(common) / max(len(bid_toks), 1)
+            ratio_b = len(common) / max(len(sbx_toks), 1)
+            if ratio_a >= 0.6 or ratio_b >= 0.6:
+                if len(common) > best_common:
+                    best = r
+                    best_common = len(common)
+    return best
+
+
+def scan_sbx_addenda(bid: dict, sbx_by_id: dict, sbx_all: list[dict]) -> tuple[int, dict | None]:
+    """For an active bid, return (addenda_count, sbx_row_used). Both 0 / None
+    if no SBX listing matches."""
+    sbx = find_sbx_for_bid(bid, sbx_by_id, sbx_all)
+    if not sbx:
+        return 0, None
+    payload = sbx.get("payload") or {}
+    n = _parse_addenda_count(payload.get("addenda"))
+    return n, sbx
+
+
 def fetch_existing_addenda(bid_id: str) -> dict[int, dict]:
     qs = (f"select=*&bid_id=eq.{urllib.parse.quote(bid_id, safe='')}"
           f"&order=addendum_number.asc")
@@ -592,6 +699,7 @@ def send_alert(svc, sender: str, recipient: str,
         srcs = []
         if det.get("found_in_gmail"): srcs.append("Gmail")
         if det.get("found_in_folder"): srcs.append("Folder")
+        if det.get("found_in_sbx"):    srcs.append("SBX")
         if not srcs: srcs = ["unknown source"]
         lines.append(
             f"  - EST# {bid.get('est_number')} {bid.get('project_name')[:40]}\n"
@@ -644,6 +752,12 @@ def main():
     bids = fetch_active_bids(gmail_svc=svc, dbx=dbx)
     print(f"{len(bids)} active bid(s) with gmail_label + dropbox_folder")
 
+    # Pre-load SBX listings index once -- used to cross-reference each bid's
+    # SBX-listed addendum count. The SBX listing page already counts addenda
+    # per project, scraped into sbx_listings_cloud.payload.addenda.
+    sbx_by_id, sbx_all = fetch_sbx_listings_index()
+    print(f"Loaded {len(sbx_all)} SBX listings for cross-reference.")
+
     new_for_email: list[dict] = []
 
     for bid in bids:
@@ -663,7 +777,20 @@ def main():
         except Exception as e:
             print(f"  [err] folder scan: {e}"); folder_found = {}
 
-        all_nums = sorted(set(gmail_found) | set(folder_found))
+        # SBX scan: pulls the listing's `addenda` count (already scraped).
+        # If SBX says N addenda exist, we record numbers 1..N. Sources are
+        # reconciled below (gmail / folder / sbx all merge into one row per
+        # addendum number).
+        try:
+            sbx_count, sbx_row = scan_sbx_addenda(bid, sbx_by_id, sbx_all)
+        except Exception as e:
+            print(f"  [err] sbx scan: {e}"); sbx_count, sbx_row = 0, None
+        sbx_nums = set(range(1, sbx_count + 1)) if sbx_count > 0 else set()
+        if sbx_count:
+            print(f"  sbx listing reports {sbx_count} addenda "
+                  f"(opsplannum={sbx_row.get('opsplannum') if sbx_row else '?'})")
+
+        all_nums = sorted(set(gmail_found) | set(folder_found) | sbx_nums)
         if not all_nums:
             print("  no addenda detected")
             continue
@@ -674,8 +801,14 @@ def main():
         for num in all_nums:
             g = gmail_found.get(num) or {}
             f = folder_found.get(num) or {}
+            in_sbx = num in sbx_nums
             row_id = f"{bid_id}::addendum-{num}"
             prior = existing.get(num)
+
+            sbx_note = ""
+            if in_sbx and sbx_row:
+                sbx_note = (f"sbx_listing:{sbx_row.get('opsplannum') or sbx_row.get('id')} "
+                            f"addenda_count={sbx_count}")
 
             row = {
                 "id": row_id,
@@ -688,6 +821,7 @@ def main():
                 "found_in_folder": bool(f),
                 "folder_path": f.get("folder_path"),
                 "folder_files": f.get("files") or [],
+                "notes": sbx_note or None,
                 "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
             upsert_addendum(row)
@@ -698,10 +832,17 @@ def main():
             #   source -> consider it a "reconciled" event but don't re-email
             #   (avoid noise). User can read the row in the UI.
             if prior is None:
-                row["bid"] = bid
-                row["detection"] = row.copy()
-                new_for_email.append({"bid": bid, "detection": row})
-                print(f"  + addendum {num} (new) -- gmail={bool(g)}, folder={bool(f)}")
+                # Embed the source flags in the detection dict that the
+                # email formatter reads.
+                detection = row.copy()
+                detection["found_in_sbx"] = in_sbx
+                new_for_email.append({"bid": bid, "detection": detection})
+                src_flags = ", ".join(filter(None, [
+                    "gmail" if g else "",
+                    "folder" if f else "",
+                    "sbx" if in_sbx else "",
+                ]))
+                print(f"  + addendum {num} (new) -- {src_flags or 'no source'}")
             else:
                 print(f"  ~ addendum {num} (already known)")
 
