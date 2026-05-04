@@ -40,7 +40,7 @@ SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 BIDS_TABLE = "bids_cloud"
 SENT_TABLE = "job_walk_invites_sent_cloud"
 KV_TABLE = "dropbox_kv_cloud"
-SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]  # canonical scope; subsumes send
 CLAUDE_API_KEY = (os.environ.get("CLAUDE_API_KEY") or "").strip()
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
@@ -233,6 +233,16 @@ def parse_jobwalk(s):
 # --- Build .ics --------------------------------------------------------------
 
 def ics_for_jobwalk(uid, *, project_name, est_number, start, location, organizer, description, attendees=None):
+    # Gmail / Outlook hide the "Yes / Maybe / No" RSVP banner when the
+    # ORGANIZER matches the recipient (you don't RSVP to your own meeting).
+    # If the SMTP sender (alex@) is also a recipient, override the .ics
+    # ORGANIZER to a service identity so Gmail treats this as an external
+    # invite and renders the banner. The organizer email doesn't have to
+    # be a real mailbox -- only the format is validated.
+    SERVICE_ORGANIZER = "bidops@fusionelectric-inc.com"
+    organizer_for_ics = SERVICE_ORGANIZER if (
+        organizer and any(em == organizer for em in (attendees or []))
+    ) else organizer
     end = start + dt.timedelta(hours=1)
     def esc(s):
         return (s or "").replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
@@ -272,7 +282,7 @@ def ics_for_jobwalk(uid, *, project_name, est_number, start, location, organizer
         f"SUMMARY:{esc(summary)}\r\n"
         f"DESCRIPTION:{esc(description)}\r\n"
         f"LOCATION:{esc(location)}\r\n"
-        f"ORGANIZER;CN=Fusion Electric:mailto:{organizer}\r\n"
+        f"ORGANIZER;CN=Fusion Bay PowerBid:mailto:{organizer_for_ics}\r\n"
         f"{attendee_lines}"
         "END:VEVENT\r\n"
         "END:VCALENDAR\r\n"
@@ -349,15 +359,26 @@ def main():
         project = b.get("project_name") or "(untitled)"
         gc = b.get("client_gc") or ""
         docs = b.get("documents_url") or ""
-        # Location precedence:
-        #   1. Claude extraction from cached spec docs (where the bid invite
-        #      actually states the meeting location)
-        #   2. payload.location from BID LIST
-        #   3. client_gc as a fuzzy fallback
-        #   4. "TBD"
-        fallback = (payload.get("location") or "").strip() or gc or "TBD"
-        spec_text = fetch_cached_spec_text_for_est(est)
-        location = extract_jobwalk_location(spec_text, project_name=project, fallback_location=fallback)
+        # Location precedence (highest to lowest):
+        #   1. SBX listing's pre_bid_meeting_location (parsed from the
+        #      "Pre Bid Conference: ... (LOCATION HERE) ..." block on the
+        #      project page) -- this is the most reliable when present
+        #   2. Claude extraction from cached spec docs
+        #   3. payload.location from BID LIST
+        #   4. "TBD" -- but never fall back to client_gc, because if the
+        #      client got normalized to "MISC CUSTOMER" (not in KEYS list),
+        #      using it as the meeting address makes no sense.
+        sbx = b.get("sbx_listing") or {}
+        sbx_pre_bid_loc = (sbx.get("pre_bid_meeting_location") or "").strip()
+        bid_list_loc = (payload.get("location") or "").strip()
+        if sbx_pre_bid_loc:
+            location = sbx_pre_bid_loc
+        else:
+            spec_text = fetch_cached_spec_text_for_est(est)
+            location = extract_jobwalk_location(
+                spec_text, project_name=project,
+                fallback_location=(bid_list_loc or "TBD"),
+            )
         ics_uid = f"jobwalk-{b['id']}-{h}@fusionelectric-inc.com"
         # Pull richer bid context for the description summary
         bid_due = (payload.get("bidDueDate") or b.get("bid_due_date") or "").strip()

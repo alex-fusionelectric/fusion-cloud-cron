@@ -51,7 +51,7 @@ except ImportError as exc:
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 INVITATIONS_TABLE = "bid_invitations"
 KV_TABLE = "gmail_kv_cloud"
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]  # canonical scope; subsumes readonly
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
 # Built from analyze-bid-invitations.py training output (1051 historical

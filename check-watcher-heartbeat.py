@@ -39,7 +39,7 @@ SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 HEARTBEAT_TABLE = "local_watcher_status_cloud"
 ALERT_TABLE     = "watcher_alert_state_cloud"
 WATCHER_ID      = "main"
-SCOPES          = ["https://www.googleapis.com/auth/gmail.send"]
+SCOPES          = ["https://www.googleapis.com/auth/gmail.modify"]  # canonical scope; subsumes send
 
 # Heartbeat older than this -> offline. Watcher polls every 60s; allow
 # generous buffer for transient stalls (Excel autofill can take ~3 min).

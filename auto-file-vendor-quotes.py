@@ -50,10 +50,7 @@ except ImportError as exc:
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 QUOTE_FILES_TABLE = "quote_files_cloud"
 ACTIVE_BIDS_TABLES = ("prebid_bids_cloud", "bid_setup_completions_cloud")
-GMAIL_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.modify",
-]
+GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]  # canonical scope
 
 # Domains we consider Fusion's own (skip filing our own attachments).
 FUSION_DOMAINS = {

@@ -74,9 +74,12 @@ CREDIT_ALERT_STATE_PATH = SCRIPTS_DIR / "credit-alert-state.json"
 CREDIT_ALERT_COOLDOWN_HOURS = 12
 CREDIT_ALERT_TO = "alex@fusionelectric-inc.com"
 
-# Claude config. Opus 4.7 is the default but Haiku 4.5 is way cheaper for
-# this workload. Override via env var when you want to dial it.
-CLAUDE_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+# Claude config. This parser does structured extraction (JSON shape with
+# vendor/scope/$ fields from email threads) -- a task Haiku 4.5 handles
+# just as well as Opus at 1/15 the cost. Defaulting to Haiku saved
+# Alex ~$20/day in May 2026 vs Opus. Override via env var
+# (ANTHROPIC_MODEL=claude-opus-4-7) for higher-stakes enrichment runs.
+CLAUDE_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 # 8K is enough for ~50 vendors of JSON output; under the 1024-output min
 # for prompt caching is fine since we cache the system prompt only.
 CLAUDE_MAX_TOKENS = 8000
@@ -84,12 +87,9 @@ CLAUDE_MAX_TOKENS = 8000
 # Gmail label hierarchy. Sub-labels under this prefix are treated as
 # individual project folders.
 ROOT_LABEL = "ESTIMATING/CURRENT BIDS"
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    # gmail.send is used by send_credit_alert() to email the user when the
-    # Anthropic account hits a credit-balance / billing wall mid-run.
-    "https://www.googleapis.com/auth/gmail.send",
-]
+# gmail.modify subsumes readonly + send + labels -- canonical scope for
+# the shared GMAIL_TOKEN_JSON.
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 # Anything @ this domain is treated as outbound (us). Everything else is a
 # vendor reply.

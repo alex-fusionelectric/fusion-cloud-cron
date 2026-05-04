@@ -51,10 +51,7 @@ except ImportError as exc:
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 ADDENDA_TABLE = "bid_addenda_cloud"
 EMAILS_REVIEW_TABLE = "bid_emails_review_cloud"
-GMAIL_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
-]
+GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]  # canonical scope; subsumes readonly + send + labels
 
 # We treat all of these as "addendum-equivalent" -- they can change scope
 # just as much as a formal addendum, so missing one is just as costly:

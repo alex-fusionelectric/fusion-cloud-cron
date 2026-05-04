@@ -276,6 +276,7 @@ def parse_detail(html):
         "pre_bid_meeting": None,
         "pre_bid_meeting_at": None,
         "pre_bid_meeting_location": None,
+        "pre_bid_meeting_mandatory": None,
         "bid_security": None,
         "estimated_value": None,
         "project_duration": None,
@@ -294,10 +295,55 @@ def parse_detail(html):
     ph = re.search(r"\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}", text)
     if ph: out["owner_contact_phone"] = ph.group(0)
 
-    # Pre-bid meeting block: usually labeled in caps
+    # Pre-bid meeting block: usually labeled in caps. We capture the raw
+    # block AND parse structured fields (date, time, location, mandatory)
+    # because the existing job-walk-invite cron + BID BREAKDOWN autofill
+    # both want these as separate fields.
     m = re.search(r"(pre[- ]?bid[^.]{0,300})", text, re.IGNORECASE)
     if m:
-        out["pre_bid_meeting"] = collapse_ws(m.group(1))[:500]
+        block = collapse_ws(m.group(1))[:500]
+        out["pre_bid_meeting"] = block
+
+        # Date/time: SBX commonly shows "5/14 @ 10AM" or "5/14/2026 at 10:00 AM"
+        # Allow the year to be missing -- assume CURRENT year unless that
+        # date already passed, then bump to next year.
+        dt_match = re.search(
+            r"(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?"      # 5/14 or 5/14/2026
+            r"\s*(?:@|at)?\s*"
+            r"(\d{1,2})(?::(\d{2}))?\s*([apAP][mM])?",
+            block,
+        )
+        if dt_match:
+            try:
+                mo = int(dt_match.group(1)); dy = int(dt_match.group(2))
+                yr_raw = dt_match.group(3)
+                if yr_raw:
+                    yr = int(yr_raw)
+                    if yr < 100: yr += 2000
+                else:
+                    today = datetime.now()
+                    yr = today.year
+                    candidate = datetime(yr, mo, dy)
+                    if candidate.date() < today.date():
+                        yr += 1
+                hh = int(dt_match.group(4)); mn = int(dt_match.group(5) or 0)
+                ampm = (dt_match.group(6) or "").lower()
+                if ampm == "pm" and hh < 12: hh += 12
+                if ampm == "am" and hh == 12: hh = 0
+                # Treat as Pacific local; the cron sends invites in PT
+                out["pre_bid_meeting_at"] = datetime(yr, mo, dy, hh, mn).isoformat()
+            except Exception as e:
+                out["warnings"].append(f"pre_bid_meeting_at parse failed: {e}")
+
+        # Location: usually in parens after the date
+        loc_match = re.search(r"\(([^)]+)\)", block)
+        if loc_match:
+            out["pre_bid_meeting_location"] = collapse_ws(loc_match.group(1))[:240]
+
+        # Mandatory: look for explicit "Mandatory: Yes/No"
+        mand_match = re.search(r"mandatory\s*:?\s*(yes|no)", block, re.IGNORECASE)
+        if mand_match:
+            out["pre_bid_meeting_mandatory"] = mand_match.group(1).lower() == "yes"
 
     # Bid date+time -- look for "Bid Date:" or "Bids Due:" patterns
     m = re.search(r"(?:bid date|bids? due|due date)\s*:?\s*([\d/\-]{8,10}(?:\s+\d{1,2}:\d{2}\s*[apAP][mM])?)", text, re.IGNORECASE)
@@ -485,9 +531,10 @@ def main():
             "owner_contact_email":    parsed.get("owner_contact_email"),
             "owner_address":          parsed.get("owner_address"),
             "bid_date":               parsed.get("bid_date"),
-            "pre_bid_meeting":        parsed.get("pre_bid_meeting"),
-            "pre_bid_meeting_at":     parsed.get("pre_bid_meeting_at"),
-            "pre_bid_meeting_location": parsed.get("pre_bid_meeting_location"),
+            "pre_bid_meeting":           parsed.get("pre_bid_meeting"),
+            "pre_bid_meeting_at":        parsed.get("pre_bid_meeting_at"),
+            "pre_bid_meeting_location":  parsed.get("pre_bid_meeting_location"),
+            "pre_bid_meeting_mandatory": parsed.get("pre_bid_meeting_mandatory"),
             "bid_security":           parsed.get("bid_security"),
             "estimated_value":        parsed.get("estimated_value"),
             "project_duration":       parsed.get("project_duration"),

@@ -34,7 +34,7 @@ except ImportError as exc:
 
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 TABLE = "bid_emails_review_cloud"
-GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]  # canonical scope; subsumes send
 
 
 def _service_key():

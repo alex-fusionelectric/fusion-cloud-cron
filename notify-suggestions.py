@@ -49,10 +49,7 @@ CREDENTIALS_PATH = SCRIPTS_DIR / "gmail-credentials.json"
 TOKEN_PATH = SCRIPTS_DIR / "gmail-token.json"
 STATE_PATH = SCRIPTS_DIR / "suggestion-notify-state.json"
 
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
-]
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]  # canonical scope; subsumes readonly + send + labels
 
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 SUPABASE_ANON_KEY = (

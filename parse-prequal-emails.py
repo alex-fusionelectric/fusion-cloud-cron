@@ -43,7 +43,11 @@ SUPABASE_TABLE = "prequal_approvals_cloud"
 SBX_TABLE = "sbx_listings_cloud"
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+# gmail.modify is the canonical scope for the shared GMAIL_TOKEN_JSON --
+# subsumes readonly + send + labels. Asserting a narrower scope here would
+# fail token refresh with `invalid_scope` (Google treats scope strings as
+# discrete identifiers, not a hierarchy).
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 GMAIL_QUERY = (
     'from:kim@fusionelectric-inc.com '
     '(subject:prequal OR subject:"Pre-Qualification" OR subject:"pre-qualification" '
