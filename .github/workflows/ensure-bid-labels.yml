@@ -1,0 +1,32 @@
+name: Ensure active bids have Gmail labels
+
+# Every active bid in BID LIST must always have a Gmail label under
+# ESTIMATING/CURRENT BIDS/YY-NNN NAME. Creates missing labels and writes
+# them to bids_realtime_cloud so Bay PowerBid shows the label indicator
+# even if the watcher missed it. Per Alex 2026-05-04.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ensure-bid-labels
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt google-api-python-client google-auth-oauthlib
+      - name: Ensure every active bid has a Gmail label
+        env:
+          GMAIL_TOKEN_JSON:     ${{ secrets.GMAIL_TOKEN_JSON }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ensure-bid-labels.py
