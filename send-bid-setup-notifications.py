@@ -117,6 +117,17 @@ def render_email_body(row: dict) -> tuple[str, str]:
     if warns:
         warn_block = "\nWarnings:\n" + "\n".join(f"  - {w}" for w in warns) + "\n"
 
+    verify_block = (
+        f"\n"
+        f"⚠️  ESTIMATOR — PLEASE VERIFY BEFORE BIDDING\n"
+        f"---------------------------------------------\n"
+        f"  [ ] BID BREAKDOWN fields correct (name, EST#, GC, bid date, division)\n"
+        f"  [ ] FEI ESTIMATE.docx renamed and fields match\n"
+        f"  [ ] PLANS & SPECS complete — all sheets downloaded, addenda acknowledged\n"
+        f"  [ ] Job walk date/location confirmed (if applicable)\n"
+        f"  [ ] Bid submission deadline, format, and contact verified\n"
+        f"\n"
+    )
     plain = (
         f"Bid setup complete\n"
         f"==================\n"
@@ -132,7 +143,7 @@ def render_email_body(row: dict) -> tuple[str, str]:
         f"Cells filled:   {filled}\n"
         f"{warn_block}"
         f"{download_block}"
-        f"\n"
+        f"{verify_block}"
         f"-- Bay PowerBid bid-setup watcher\n"
     )
 
@@ -157,6 +168,18 @@ def render_email_body(row: dict) -> tuple[str, str]:
     if warns:
         warn_html = "<p><b>Warnings:</b><ul>" + "".join(f"<li>{esc(w)}</li>" for w in warns) + "</ul></p>"
 
+    verify_html = """
+<div style="margin-top:20px;padding:14px 16px;background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;">
+  <p style="margin:0 0 10px;font-weight:800;color:#92400e;font-size:13px;">⚠️ ESTIMATOR — Please verify before bidding</p>
+  <ul style="margin:0;padding-left:20px;color:#78350f;font-size:13px;line-height:1.8;">
+    <li>BID BREAKDOWN fields correct (project name, EST#, GC, bid date, division)</li>
+    <li>FEI ESTIMATE.docx renamed and header fields match</li>
+    <li>PLANS &amp; SPECS complete — all sheets downloaded, addenda acknowledged</li>
+    <li>Job walk date / location confirmed (if applicable)</li>
+    <li>Bid submission deadline, format, and recipient contact verified</li>
+  </ul>
+</div>"""
+
     html = f"""<!doctype html><html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;color:#1f2937;">
 <h2 style="margin:0 0 12px;color:#0f172a;">Bid setup complete</h2>
 <table cellpadding="4" style="border-collapse:collapse;font-size:14px;">
@@ -171,6 +194,7 @@ def render_email_body(row: dict) -> tuple[str, str]:
 </table>
 {warn_html}
 {files_html}
+{verify_html}
 <p style="color:#64748b;font-size:12px;margin-top:18px;">- Bay PowerBid bid-setup watcher</p>
 </body></html>"""
 
