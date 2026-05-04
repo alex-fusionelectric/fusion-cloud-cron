@@ -332,17 +332,34 @@ def main():
 
     svc = gmail_service()
     sent = 0
+    skipped_past = 0
     for b in bids:
         payload = b.get("payload") or {}
         jw_raw = (payload.get("jobWalk") or "").strip()
         start = parse_jobwalk(jw_raw)
         if not start:
             continue
-        # Stable id for the dedup table -- bid_id + first 12 chars of sha of
-        # the JOB WALK string. Re-scheduling produces a new id automatically.
+        # Skip past job walks. Per Alex 2026-05-04: re-emailing invites for
+        # walks that already happened spams everyone. We only want one
+        # invite per FUTURE walk. Anything in the past is silently skipped.
+        # Compare in local time (the .ics is built around local time too).
+        now_local = dt.datetime.now()
+        if start < now_local:
+            skipped_past += 1
+            continue
+        # Stable dedup id: est_number + sha1 of the JOB WALK string. Using
+        # est_number (not bid.id) avoids the trap where bids_cloud's id
+        # column gets a new value on every truncate-and-insert sync,
+        # breaking the dedup. EST#s are stable. Re-scheduling a walk
+        # generates a new hash and bypasses this dedup -- correct.
         h = hashlib.sha1(jw_raw.encode("utf-8")).hexdigest()[:12]
-        dedup_id = f"{b['id']}:{h}"
-        if dedup_id in already_sent:
+        est_for_dedup = (b.get("est_number") or b.get("id") or "?").strip()
+        dedup_id = f"{est_for_dedup}:{h}"
+        # Backwards-compat: also check against the legacy id format so we
+        # don't re-send invites for walks that were ALREADY recorded under
+        # the old (unstable) key shape during the rollout.
+        legacy_dedup_id = f"{b.get('id', '')}:{h}"
+        if dedup_id in already_sent or legacy_dedup_id in already_sent:
             continue
 
         # Recipients: Alex + assigned estimator + PE (when we know their email).
@@ -438,7 +455,7 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"  [warn] send failed for EST# {est}: {e}")
 
-    print(f"\nSent {sent} new job-walk invite(s).")
+    print(f"\nSent {sent} new job-walk invite(s). Skipped {skipped_past} past-date walks.")
 
 
 if __name__ == "__main__":
