@@ -90,10 +90,14 @@ def create_label(svc, name: str) -> str:
 
 
 def get_active_bids() -> list[dict]:
-    """Fetch active bids from bids_cloud."""
+    """Fetch active BAY-division bids from bids_cloud.
+
+    Gmail labels under ESTIMATING/CURRENT BIDS/ are Alex's BAY inbox only.
+    SAC bids belong to Austin and must NOT get labels here.
+    """
     status_in = ",".join(urllib.parse.quote(s, safe="") for s in ACTIVE_STATUS)
-    st, body = _sb("GET", f"bids_cloud?select=est_number,project_name,status,outcome"
-                          f"&status=in.({status_in})&limit=200")
+    st, body = _sb("GET", f"bids_cloud?select=est_number,project_name,status,outcome,division"
+                          f"&status=in.({status_in})&division=eq.BAY&limit=200")
     if st != 200:
         print(f"[warn] bids_cloud fetch failed: HTTP {st}")
         return []
