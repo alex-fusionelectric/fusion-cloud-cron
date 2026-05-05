@@ -71,16 +71,24 @@ GMAIL_QUERY = (
       "from:tcgbuilders.com OR from:matrixhginc.com OR from:macom.com OR "
       "from:ironwoodcb.com OR "          # Ironwood Commercial Builders (LLNL bids)
       "from:gocc.smartbid.co OR "        # GSE Construction SmartBid portal
+      "from:thecoregroup.com OR "        # The Core Group GC
       # Subject patterns — ITB is the most-missed abbreviation
       'subject:ITB OR subject:"invitation to bid" OR subject:"bid invitation" OR '
       'subject:"request for proposal" OR subject:"request for quote" OR '
       'subject:"request for quotation" OR subject:RFP OR subject:RFQ OR '
       'subject:"bid opportunity" OR subject:"prequalification" OR '
-      'subject:"quote request" OR subject:"subcontractor bid"'
+      'subject:"quote request" OR subject:"subcontractor bid" OR '
+      'subject:"subcontractor bid"'
     ") "
     "-from:fusionelectric-inc.com "
     "-from:fusionelectricinc.onmicrosoft.com"
 )
+
+# Second query: scan the 00-POTENTIAL BIDS label with NO sender filter.
+# Jake and the team forward bid invitations here (BuildingConnected, etc.).
+# Because the From: shows a Fusion address (forwarder), the main GMAIL_QUERY
+# excludes them. This separate label scan catches everything in that folder.
+POTENTIAL_BIDS_LABEL_QUERY = "label:estimating-current-bids-00-potential-bids"
 
 
 # --- Supabase REST helpers ---------------------------------------------------
@@ -263,21 +271,35 @@ def main():
     cap = int(os.environ.get("BID_RADAR_LIMIT") or 200)
 
     svc = gmail_service()
-    query = f"{GMAIL_QUERY} newer_than:{days}d"
-    print(f"Gmail query (cap {cap}): {query}")
 
-    page_token = None
-    candidates = []
-    while True:
-        kwargs = {"userId": "me", "q": query, "maxResults": min(100, cap - len(candidates))}
-        if page_token:
-            kwargs["pageToken"] = page_token
-        resp = svc.users().messages().list(**kwargs).execute()
-        candidates.extend(resp.get("messages", []) or [])
-        page_token = resp.get("nextPageToken")
-        if not page_token or len(candidates) >= cap:
-            break
-    print(f"Found {len(candidates)} candidate messages.")
+    def _fetch_candidates(q: str, limit: int) -> list[dict]:
+        out, page_token = [], None
+        while True:
+            kwargs = {"userId": "me", "q": q, "maxResults": min(100, limit - len(out))}
+            if page_token:
+                kwargs["pageToken"] = page_token
+            resp = svc.users().messages().list(**kwargs).execute()
+            out.extend(resp.get("messages", []) or [])
+            page_token = resp.get("nextPageToken")
+            if not page_token or len(out) >= limit:
+                break
+        return out
+
+    # Pass 1: external-sender query (GC platforms, known GC domains, keywords)
+    query = f"{GMAIL_QUERY} newer_than:{days}d"
+    print(f"Gmail query pass 1 (cap {cap}): {query[:120]}...")
+    candidates = _fetch_candidates(query, cap)
+    print(f"  Pass 1: {len(candidates)} messages")
+
+    # Pass 2: 00-POTENTIAL BIDS label (no sender filter — Jake/team forward bids
+    # here from BuildingConnected etc.; the From: shows Fusion so pass 1 misses them)
+    label_query = f"{POTENTIAL_BIDS_LABEL_QUERY} newer_than:{days}d"
+    label_candidates = _fetch_candidates(label_query, 200)
+    seen_ids = {m["id"] for m in candidates}
+    new_from_label = [m for m in label_candidates if m["id"] not in seen_ids]
+    candidates.extend(new_from_label)
+    print(f"  Pass 2 (00-POTENTIAL BIDS label): {len(label_candidates)} found, {len(new_from_label)} new")
+    print(f"Total candidates after both passes: {len(candidates)}")
 
     cache_keys = [f"bidinv:{m['id']}" for m in candidates]
     cache = kv_get_many(cache_keys)
