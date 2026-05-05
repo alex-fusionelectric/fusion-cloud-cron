@@ -265,9 +265,7 @@ def collapse_ws(s):
 
 def parse_detail(html):
     """Best-effort extraction of structured fields from filter.aspx HTML.
-    Returns dict; missing fields are None. Discovery-mode-tolerant: if a
-    field doesn't match expected patterns, it stays None and we keep
-    the raw HTML so we can refine later."""
+    Returns dict; missing fields are None."""
     out = {
         "long_description": None,
         "owner_contact_name": None,
@@ -286,41 +284,43 @@ def parse_detail(html):
         "addenda_list": [],
         "doc_count": 0,
         "doc_list": [],
-        "plan_holders": [],   # extracted from GC table on main detail page
+        "plan_holders": [],
         "warnings": [],
     }
 
-    # Extract plan holders / GC table from main detail page.
-    # SBX embeds the bidder/plan-holder table directly on filter.aspx.
-    # Table header = "General Contractor" (or "Plan Holders"); rows have:
-    #   company name (may end with * = confirmed), email, Ph:xxx, City ST
-    gc_table_rx = re.compile(
-        r"(?:General\s+Contractor|Plan\s+Holders?|Bidder[s]?\s+List)"
-        r".*?</tr>(.*?)(?:</table>|<table)",
-        re.IGNORECASE | re.DOTALL,
-    )
-    gc_match = gc_table_rx.search(html)
-    if gc_match:
-        tr_pat2 = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
-        td_pat2 = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
-        for tr in tr_pat2.findall(gc_match.group(1)):
-            cells = [collapse_ws(unescape(strip_tags(c))) for c in td_pat2.findall(tr)]
-            if not cells: continue
-            name = cells[0].rstrip(" *").strip()
-            if not name or len(name) < 3 or len(name) > 150: continue
-            if not re.search(r"[A-Za-z]", name): continue
-            confirmed = cells[0].strip().endswith("*")
-            email = next((c for c in cells if "@" in c and "." in c), None)
-            phone_raw = next((c for c in cells if re.search(r"\d{3}[\s.(/-]?\d{3}", c)), None)
-            phone = re.sub(r"^Ph:\s*", "", phone_raw or "").strip() if phone_raw else None
-            city_cell = cells[-1] if len(cells) >= 3 else None
-            out["plan_holders"].append({
-                "name": name,
-                "confirmed": confirmed,
-                "email": email,
-                "phone": phone,
-                "city": city_cell,
-            })
+    # SBX uses Bootstrap panel divs for plan holders — NOT tables.
+    # Each bidder: <div class="panel-collapse BidderEntry ..."> ... </div></div></div>
+    # Inside: bold span with &nbsp; prefix = company name, mailto link = email,
+    # Ph</abbr>:xxx = phone, <strong>City ST</strong> = city.
+    seen_ph: set = set()
+    for m in re.finditer(
+        r'<div[^>]+class="[^"]*panel-collapse BidderEntry[^"]*"[^>]*>(.*?)</div>\s*</div>\s*</div>',
+        html, re.DOTALL | re.IGNORECASE
+    ):
+        block = m.group(1)
+        nm_m = re.search(
+            r'<span[^>]*style="[^"]*font-weight\s*:\s*bold[^"]*"[^>]*>\s*(?:&nbsp;)?\s*([^<]{3,}?)\s*</span>',
+            block, re.IGNORECASE)
+        if not nm_m:
+            continue
+        name = collapse_ws(unescape(strip_tags(nm_m.group(1)))).strip(" *").strip()
+        if not name or len(name) < 3 or not re.search(r"[A-Za-z]", name):
+            continue
+        key = re.sub(r"[^a-z0-9]", "", name.lower())
+        if key in seen_ph:
+            continue
+        seen_ph.add(key)
+        confirmed = bool(re.search(r"Confirmed Bidder", block, re.IGNORECASE))
+        email_m = re.search(r'href="mailto:([^"]+)"', block, re.IGNORECASE)
+        email = email_m.group(1).lower().strip() if email_m else None
+        phone_m = re.search(r"Ph</abbr>\s*:?\s*([\d(). \-]+)", block, re.IGNORECASE)
+        phone = phone_m.group(1).strip() if phone_m else None
+        city_m = re.search(r"<strong>([^<]{3,})</strong>", block)
+        city = collapse_ws(strip_tags(city_m.group(1))) if city_m else None
+        out["plan_holders"].append({
+            "name": name, "confirmed": confirmed,
+            "email": email, "phone": phone, "city": city,
+        })
 
     text = collapse_ws(strip_tags(html))
 
@@ -567,6 +567,7 @@ def main():
 
         now_iso = datetime.now(timezone.utc).isoformat()
         detail_row = {
+            "id":                     plannum,
             "opsplannum":             plannum,
             "bid_package_id":         bpid,
             "project_name":           r.get("project_name"),
@@ -636,8 +637,8 @@ def main():
         time.sleep(0.4)
 
     print(f"\nUpserting {len(detail_rows)} project details, {len(holder_rows)} plan holders ...")
-    n_d = upsert("sbx_project_details_cloud", detail_rows)
-    n_h = upsert("sbx_plan_holders_cloud", holder_rows)
+    n_d = upsert("sbx_project_details_cloud?on_conflict=id", detail_rows)
+    n_h = upsert("sbx_plan_holders_cloud?on_conflict=id", holder_rows)
     print(f"  details: {n_d}  holders: {n_h}")
 
     # Mark plan holders not seen this run as "dropped" only if they belong to a
