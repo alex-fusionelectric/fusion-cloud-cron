@@ -153,8 +153,73 @@ def main() -> int:
         else:
             print(f"  [warn] bids_realtime_cloud upsert {est} HTTP {st2}")
 
+    # Scan Gmail labels for each bid to find GCs who have emailed into the label.
+    # Any external sender (not @fusionelectric-inc.com) in the bid's label thread
+    # is a potential GC — write to sbx_plan_holders_cloud so the card shows them.
+    gc_rows = []
+    FUSION_DOMAIN = "fusionelectric-inc.com"
+    for est, label_name in existing.items():
+        if not label_name:
+            continue
+        try:
+            # Get up to 20 thread senders from this label
+            threads_resp = svc.users().threads().list(
+                userId="me",
+                labelIds=[next((L["id"] for L in svc.users().labels().list(userId="me").execute().get("labels",[])
+                                if L.get("name") == label_name), "")],
+                maxResults=20
+            ).execute()
+            for t in threads_resp.get("threads", []) or []:
+                thread = svc.users().threads().get(userId="me", id=t["id"], format="minimal").execute()
+                for msg in (thread.get("messages") or [])[:5]:
+                    headers = {h["name"].lower(): h["value"]
+                               for h in (msg.get("payload", {}).get("headers") or [])}
+                    frm = headers.get("from", "")
+                    addr = re.search(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", frm)
+                    if not addr:
+                        continue
+                    email = addr.group(0).lower()
+                    if FUSION_DOMAIN in email:
+                        continue
+                    org = email.split("@")[1] if "@" in email else email
+                    name_part = frm.split("<")[0].strip().strip('"') or org
+                    nm_norm = re.sub(r"\s+", " ", name_part.upper().replace("&", " AND ")).strip()
+                    if not nm_norm or len(nm_norm) < 3:
+                        continue
+                    gc_rows.append({
+                        "id": f"{est}::GMAIL::{nm_norm[:40]}",
+                        "opsplannum": est,
+                        "gc_name": name_part[:120],
+                        "gc_name_normalized": nm_norm[:120],
+                        "contact_email": email,
+                        "status": "active",
+                        "last_seen_at": now_iso,
+                        "updated_at": now_iso,
+                    })
+        except Exception as _ge:
+            pass  # missing label or API error — skip silently
+
+    # Dedupe by id before upsert
+    seen_ids: set[str] = set()
+    deduped = []
+    for g in gc_rows:
+        if g["id"] not in seen_ids:
+            seen_ids.add(g["id"])
+            deduped.append(g)
+
+    if deduped:
+        for i in range(0, len(deduped), 50):
+            chunk = deduped[i:i + 50]
+            st_g, _ = _sb("POST",
+                          f"sbx_plan_holders_cloud?on_conflict=id",
+                          body=chunk)
+            if st_g not in (200, 201, 204):
+                print(f"  [warn] gc upsert HTTP {st_g}")
+        print(f"  Wrote {len(deduped)} GC contacts from Gmail labels")
+
     print(f"\nDone: {created} label(s) created, "
-          f"{updated_realtime}/{len(bids)} realtime rows synced.")
+          f"{updated_realtime}/{len(bids)} realtime rows synced, "
+          f"{len(deduped)} GC contacts from Gmail labels.")
     return 0
 
 
