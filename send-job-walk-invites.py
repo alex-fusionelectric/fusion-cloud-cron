@@ -389,12 +389,13 @@ def main():
         start = parse_jobwalk(jw_raw)
         if not start:
             continue
-        # Skip past job walks. Per Alex 2026-05-04: re-emailing invites for
-        # walks that already happened spams everyone. We only want one
-        # invite per FUTURE walk. Anything in the past is silently skipped.
-        # Compare in local time (the .ics is built around local time too).
-        now_local = dt.datetime.now()
-        if start < now_local:
+        # Skip past job walks. BID LIST stores wall-clock Pacific time.
+        # The GitHub Actions runner is UTC, so dt.datetime.now() returns UTC.
+        # Offset UTC by -7h (PDT) so we compare apples-to-apples with the
+        # stored Pacific wall-clock time. Using -7 (PDT) is conservative --
+        # any walk that hasn't started in Pacific time won't be skipped.
+        now_pacific = dt.datetime.utcnow() - dt.timedelta(hours=7)
+        if start < now_pacific:
             skipped_past += 1
             continue
         # Stable dedup id: est_number + sha1 of the JOB WALK string. Using
