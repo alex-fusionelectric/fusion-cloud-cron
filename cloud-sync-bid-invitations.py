@@ -200,6 +200,27 @@ def extract_body(payload):
     return plain if plain else _strip_html(html)
 
 
+# --- Snippet builder --------------------------------------------------------
+
+def _build_snippet(ext: dict) -> str | None:
+    """Build a raw_snippet string from extracted fields so the frontend
+    can detect job walk dates with a simple regex without needing a DB
+    schema change for job_walk_date."""
+    parts = []
+    jw_date = ext.get("job_walk_date") or ""
+    jw_time = ext.get("job_walk_time") or ""
+    if jw_date:
+        jw = f"Job Walk: {jw_date}"
+        if jw_time:
+            jw += f" {jw_time}"
+        parts.append(jw)
+    if ext.get("general_contractor"):
+        parts.append(f"GC: {ext['general_contractor']}")
+    if ext.get("owner"):
+        parts.append(f"Owner: {ext['owner']}")
+    return "  ".join(parts) if parts else None
+
+
 # --- Claude classification --------------------------------------------------
 
 def llm_extract(subject, body, sender, *, api_key):
@@ -215,6 +236,8 @@ Return ONLY a JSON object (no prose, no markdown). Use null when unknown.
   "owner": "end-client / public agency" or null,
   "location": "city/state/area" or null,
   "bid_due_date": "YYYY-MM-DD" or null,
+  "job_walk_date": "YYYY-MM-DD" or null,
+  "job_walk_time": "HH:MM AM/PM" or null,
   "scope_hints": ["distribution","fire alarm","low voltage","lighting","security","audio visual","nurse call","trenching"] subset,
   "estimating_platform": "BuildingConnected|SmartBid|PipelineSuite|PlanHub|BidNet|PlanRoom|PlanetBids|Procore|iSqFt|direct-email|other" or null,
   "permalink": "URL to the bid portal/listing" or null
@@ -384,6 +407,8 @@ def main():
             "is_invitation":   True,
             "confidence":      float(ext.get("confidence") or 0.5),
             "permalink":       ext.get("permalink"),
+            # raw_snippet stores job walk info so the frontend can display it
+            "raw_snippet":     _build_snippet(ext),
             "received_at":     received_iso,
             "generated_at":    dt.datetime.utcnow().isoformat() + "Z",
             "updated_at":      dt.datetime.utcnow().isoformat() + "Z",
