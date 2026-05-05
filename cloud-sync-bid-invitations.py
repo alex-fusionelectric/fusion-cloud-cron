@@ -60,18 +60,23 @@ CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 # slice without a server-side label hierarchy.
 GMAIL_QUERY = (
     "("
+      # Bid platforms
       "from:buildingconnected.com OR "
       "from:planroom* OR from:bidexpress* OR from:smartbid* OR from:bxwa.com OR "
       "from:onlineplanservice* OR from:planhub* OR from:pipelinesuite* OR from:procore* OR "
       "from:planetbids* OR from:bidnet* OR from:isqft* OR "
+      # Known direct-GC senders (add new domains as they appear)
       "from:yourced.com OR from:edgesgroup.com OR from:sbayconstruction.com OR "
       "from:envisioncdi.com OR from:zone4construction.com OR from:cumming-group.com OR "
       "from:tcgbuilders.com OR from:matrixhginc.com OR from:macom.com OR "
-      'subject:"invitation to bid" OR subject:"bid invitation" OR '
+      "from:ironwoodcb.com OR "          # Ironwood Commercial Builders (LLNL bids)
+      "from:gocc.smartbid.co OR "        # GSE Construction SmartBid portal
+      # Subject patterns — ITB is the most-missed abbreviation
+      'subject:ITB OR subject:"invitation to bid" OR subject:"bid invitation" OR '
       'subject:"request for proposal" OR subject:"request for quote" OR '
       'subject:"request for quotation" OR subject:RFP OR subject:RFQ OR '
       'subject:"bid opportunity" OR subject:"prequalification" OR '
-      'subject:"quote request"'
+      'subject:"quote request" OR subject:"subcontractor bid"'
     ") "
     "-from:fusionelectric-inc.com "
     "-from:fusionelectricinc.onmicrosoft.com"
