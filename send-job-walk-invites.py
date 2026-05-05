@@ -45,8 +45,8 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]  # canonical scope; su
 CLAUDE_API_KEY = (os.environ.get("CLAUDE_API_KEY") or "").strip()
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
-# Default invite recipients always include Alex; the bid's estimator + PE
-# get added when present.
+# Default invite recipients always include Alex; the bid's PE is added when
+# present. Estimator is excluded from job-walk invites per Alex 2026-05-05.
 ALWAYS_INVITE = {"alex@fusionelectric-inc.com"}
 
 # Map estimator/PE name -> email so we can copy them on the invite. The
@@ -449,14 +449,15 @@ def main():
         if dedup_id in already_sent or legacy_dedup_id in already_sent:
             continue
 
-        # Recipients: Alex + assigned estimator + PE (when we know their email).
+        # Recipients: Alex + assigned PE only.
+        # Estimator is excluded from job-walk invites per Alex 2026-05-05.
+        # Estimator still appears in the email body as project context.
         recipients = set(ALWAYS_INVITE)
-        for nm in (b.get("estimator"), b.get("project_engineer")):
-            if not nm:
-                continue
-            email = NAME_TO_EMAIL.get(str(nm).strip())
-            if email:
-                recipients.add(email)
+        pe_name = b.get("project_engineer")
+        if pe_name:
+            pe_email = NAME_TO_EMAIL.get(str(pe_name).strip())
+            if pe_email:
+                recipients.add(pe_email)
         recipients = sorted(recipients)
 
         est = b.get("est_number") or "?"
