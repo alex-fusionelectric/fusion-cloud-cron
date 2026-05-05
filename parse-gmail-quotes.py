@@ -147,6 +147,10 @@ SCOPE_RULES = [
     ("low-voltage", "low voltage"),
     ("security", "security"),
     ("access control", "security"),
+    ("surveillance", "security"),
+    ("cctv", "security"),
+    ("camera", "security"),
+    ("kiscc.com", "security"),       # KIS = Kompleks Integrated Systems (security)
     ("lighting", "lighting"),
     ("trench", "trenching"),
     ("underground", "trenching"),
@@ -410,15 +414,11 @@ def parse_internal_date(msg):
 
 def bucket_scope(text):
     """Initial scope guess from a subject string — used as a placeholder
-    BEFORE Claude enrichment kicks in. Conservative on purpose: a subject
-    like "Security Quote Request - 25-396 Bidwell Park" must NOT pre-tag
-    the row as SEC because the actual delivered quote may be a different
-    scope (e.g. Pavion responding with FA pricing). The cleaned_rows pass
-    overrides this with Claude's body-based classification when available.
+    BEFORE Claude enrichment kicks in.
     Returns 'general' when in doubt."""
     s = " " + (text or "").lower() + " "
-    # Only honor scope keywords when they appear as an explicit suffix tag
-    # (after a " - ") — same rule the post-LLM subject hint uses.
+
+    # Pass 1: explicit suffix tags after " - " (highest confidence — estimator set these)
     suffix_rules = [
         (" - fa ", "fire alarm"),
         (" - fire alarm ", "fire alarm"),
@@ -447,6 +447,36 @@ def bucket_scope(text):
     for needle, label in suffix_rules:
         if needle in s:
             return label
+
+    # Pass 2: full-phrase keyword match anywhere in subject.
+    # These phrases are unambiguous enough to tag even without a " - " prefix:
+    # "Security Quote Request", "Fire Alarm Quote Request", "Lighting Quote Request", etc.
+    phrase_rules = [
+        ("fire alarm quote", "fire alarm"),
+        ("fire alarm proposal", "fire alarm"),
+        ("fire alarm scope", "fire alarm"),
+        ("security quote", "security"),
+        ("security scope", "security"),
+        ("access control quote", "security"),
+        ("low voltage quote", "low voltage"),
+        ("low voltage scope", "low voltage"),
+        ("low volt quote", "low voltage"),
+        ("lighting quote", "lighting"),
+        ("lighting scope", "lighting"),
+        ("distribution quote", "distribution"),
+        ("electrical distribution", "distribution"),
+        ("trenching quote", "trenching"),
+        ("trench quote", "trenching"),
+        ("audio visual quote", "audio visual"),
+        ("audio/visual quote", "audio visual"),
+        ("av quote", "audio visual"),
+        ("nurse call quote", "nurse call"),
+        ("integration quote", "integration"),
+    ]
+    for phrase, label in phrase_rules:
+        if phrase in s:
+            return label
+
     return "general"
 
 
@@ -564,30 +594,68 @@ def fallback_scope_from_subject(subject):
 #  2. The dashboard reader instantly knows which parent company the email
 #     came from, even when only the contact's name is visible.
 DOMAIN_COMPANY_MAP = {
+    # Fire / Security / Low Voltage
     "rfi.com": "Pavion / RFi",
     "pavion.com": "Pavion",
+    "pyrocomm.com": "Pyro-Comm",
+    "247firealarm.com": "247 Fire Alarm",
+    "bayalarm.com": "Bay Alarm",
+    "tri-signal.com": "Tri-Signal Integration",
     "netronixint.com": "Netronix Integration",
     "ncvd.com": "NCVD",
+    "kiscc.com": "KIS (Kompleks Integrated Systems)",
+    "convergetp.com": "ConvergePro",
+    "structurednet.com": "StructureNet",
+    "lenel.com": "Lenel",
+    "verkada.com": "Verkada",
+    "telstar-instruments.com": "Telstar Instruments",
+    "tescocontrols.com": "Tesco Controls",
+    # Electrical / Distribution
     "sasco.com": "SASCO",
     "pcd-electric.com": "PCD",
+    "vineelectric.com": "Vine Electric",
+    "elco-electric.com": "Elco Electric",
+    "ampelectric.com": "Amp Electric",
+    "mainelectricsupply.com": "Main Electric",
     "graybar.com": "Graybar",
     "ced.com": "CED",
     "edges.com": "Edges Electrical",
     "edgesgroup.com": "Edges Electrical",
     "yourced.com": "CED",
+    "platt.com": "Platt Electric",
+    "rexelusa.com": "Rexel",
+    # Controls / Integration
     "jci.com": "Johnson Controls (JCI)",
     "johnsoncontrols.com": "Johnson Controls (JCI)",
-    "pyrocomm.com": "Pyro-Comm",
-    "247firealarm.com": "247 Fire Alarm",
-    "bayalarm.com": "Bay Alarm",
-    "mainelectricsupply.com": "Main Electric",
-    "verkada.com": "Verkada",
-    "lenel.com": "Lenel",
     "anixter.com": "Anixter",
-    "structurednet.com": "StructureNet",
-    "telstar-instruments.com": "Telstar Instruments",
-    "tescocontrols.com": "Tesco Controls",
+    # Audio Visual
+    "qualitysound.com": "Quality Sound",
+    "crestron.com": "Crestron",
 }
+
+# Senders that are never real vendors — notification services, mailer daemons,
+# plan rooms, and bid coordinators. Matched against display name OR email address.
+# Add here as you encounter new ones; they get silently dropped as non-vendors.
+NON_VENDOR_PATTERNS = [
+    # Mailer daemons and bounce notifications
+    "mailer-daemon", "mail delivery subsystem", "postmaster", "mailer daemon",
+    "delivery status notification", "undeliverable", "auto-reply",
+    # Plan room / bid notification services
+    "coastal online plan service", "calstate bid", "tbc bids", "tbcbids",
+    "bidnet", "planhub", "isqft", "smartbid", "buildingconnected",
+    "construct-connect", "constructconnect",
+    # Generic coordinators that aren't real sub vendors
+    "bid coordinator",
+]
+
+def _is_non_vendor(name: str, addr: str) -> bool:
+    """Return True if this sender is a notification service, mailer daemon,
+    or plan room — not a real vendor that will price work."""
+    combined = (name + " " + addr).lower()
+    for pat in NON_VENDOR_PATTERNS:
+        if pat in combined:
+            return True
+    return False
 
 
 def vendor_company_from(name, addr):
@@ -708,6 +776,12 @@ def parse_thread(thread, today, bid_due_dates_by_num, project_number):
     if not vendor_email:
         # Not enough signal to call it a vendor thread.
         return None, "no vendor identified"
+
+    # Drop notification services, mailer daemons, and plan rooms.
+    # These are never real vendors: bounce emails, plan room update emails,
+    # bid coordinator bots. Checked by display name AND email address.
+    if _is_non_vendor(vendor_name, vendor_email):
+        return None, f"non-vendor sender filtered ({vendor_name or vendor_email})"
 
     # GC vs vendor classification. If the inbound sender's domain matches
     # a known GC or bid platform, this is the GC asking us to bid (or
