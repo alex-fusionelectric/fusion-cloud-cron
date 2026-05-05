@@ -144,11 +144,35 @@ def fetch_setup_listings(limit):
 
 
 def fetch_recent_detail_fetches():
-    """Return {opsplannum: fetched_at_iso} so we can skip ones recently scanned."""
-    st, body = _sb("GET", "sbx_project_details_cloud?select=opsplannum,fetched_at")
-    if st != 200:
-        return {}
-    return {r["opsplannum"]: r["fetched_at"] for r in json.loads(body)}
+    """Return {opsplannum: last_seen_at_iso} so we can skip recently scanned ones.
+
+    Reads from sbx_plan_holders_cloud (last_seen_at) rather than
+    sbx_project_details_cloud (schema mismatch caused that table to stay
+    empty). Any opsplannum that has at least one active plan holder row
+    was recently scraped — use the most recent last_seen_at as the proxy.
+    Falls back to sbx_project_details_cloud.generated_at if available.
+    """
+    recent: dict = {}
+    # Primary: sbx_plan_holders_cloud.last_seen_at grouped by opsplannum
+    st, body = _sb("GET",
+        "sbx_plan_holders_cloud?select=opsplannum,last_seen_at"
+        "&status=eq.active&order=last_seen_at.desc&limit=5000")
+    if st == 200:
+        for r in json.loads(body):
+            ops = r.get("opsplannum") or ""
+            ts  = r.get("last_seen_at") or ""
+            if ops and ts and (ops not in recent or ts > recent[ops]):
+                recent[ops] = ts
+    # Secondary: sbx_project_details_cloud.generated_at
+    st2, body2 = _sb("GET",
+        "sbx_project_details_cloud?select=opsplannum,generated_at")
+    if st2 == 200:
+        for r in json.loads(body2):
+            ops = r.get("opsplannum") or ""
+            ts  = r.get("generated_at") or ""
+            if ops and ts and ops not in recent:
+                recent[ops] = ts
+    return recent
 
 
 # --- SBX session -------------------------------------------------------------
@@ -566,32 +590,25 @@ def main():
             print(f"  ph <li> count: {ph_html.lower().count('<li')}\n")
 
         now_iso = datetime.now(timezone.utc).isoformat()
+        # Column names must match sbx_project_details_cloud actual schema:
+        #   id, opsplannum, bid_package_id, bidder_count, addenda_count,
+        #   owner_contact, owner_phone, estimated_value, bid_security,
+        #   pre_bid_meeting, extended_description, raw_html, generated_at, updated_at
         detail_row = {
-            "id":                     plannum,
-            "opsplannum":             plannum,
-            "bid_package_id":         bpid,
-            "project_name":           r.get("project_name"),
-            "long_description":       parsed.get("long_description"),
-            "owner_contact_name":     parsed.get("owner_contact_name"),
-            "owner_contact_phone":    parsed.get("owner_contact_phone"),
-            "owner_contact_email":    parsed.get("owner_contact_email"),
-            "owner_address":          parsed.get("owner_address"),
-            "bid_date":               parsed.get("bid_date"),
-            "pre_bid_meeting":           parsed.get("pre_bid_meeting"),
-            "pre_bid_meeting_at":        parsed.get("pre_bid_meeting_at"),
-            "pre_bid_meeting_location":  parsed.get("pre_bid_meeting_location"),
-            "pre_bid_meeting_mandatory": parsed.get("pre_bid_meeting_mandatory"),
-            "bid_security":           parsed.get("bid_security"),
-            "estimated_value":        parsed.get("estimated_value"),
-            "project_duration":       parsed.get("project_duration"),
-            "addenda_count":          parsed.get("addenda_count") or 0,
-            "addenda_list":           parsed.get("addenda_list") or [],
-            "bidder_count":           len(holders) or len(parsed.get("plan_holders") or []),
-            "raw_html":               html if discovery else None,
-            "raw_planholder_html":    ph_html if discovery else None,
-            "parse_warnings":         parsed.get("warnings") or [],
-            "fetched_at":             now_iso,
-            "updated_at":             now_iso,
+            "id":                 plannum,
+            "opsplannum":         plannum,
+            "bid_package_id":     str(bpid),
+            "bidder_count":       len(holders) + len(parsed.get("plan_holders") or []),
+            "addenda_count":      parsed.get("addenda_count") or 0,
+            "owner_contact":      parsed.get("owner_contact_name") or parsed.get("owner_contact_email"),
+            "owner_phone":        parsed.get("owner_contact_phone"),
+            "estimated_value":    parsed.get("estimated_value"),
+            "bid_security":       parsed.get("bid_security"),
+            "pre_bid_meeting":    parsed.get("pre_bid_meeting"),
+            "extended_description": parsed.get("long_description"),
+            "raw_html":           html if discovery else None,
+            "generated_at":       now_iso,
+            "updated_at":         now_iso,
         }
         detail_rows.append(detail_row)
 
