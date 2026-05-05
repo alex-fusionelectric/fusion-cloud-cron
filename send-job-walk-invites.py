@@ -96,7 +96,7 @@ def fetch_active_bids():
     # urllib.parse.quote with safe='()",' preserves the literal punctuation
     # PostgREST needs.
     in_clause = urllib.parse.quote('("BIDDING","BID OR BAIL")', safe='()",')
-    qs = (f'status=in.{in_clause}&'
+    qs = (f'status=in.{in_clause}&division=eq.BAY&'
           'select=id,est_number,project_name,client_gc,estimator,project_engineer,'
           'documents_url,division,payload')
     status, body = _sb_request("GET", f"{BIDS_TABLE}?{qs}")
