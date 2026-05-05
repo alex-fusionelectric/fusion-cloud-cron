@@ -321,51 +321,87 @@ def _fold_ics(ics: str) -> str:
     return "".join(out)
 
 
-def send_invite(svc, *, sender, to_list, subject, body_text, ics_text, ics_filename):
-    """Send a calendar invite that Gmail renders with the Yes/Maybe/No RSVP banner.
+def _make_cal_part(ics_folded: str, disposition: str = "inline", filename: str | None = None) -> MIMEBase:
+    """Build a text/calendar MIME part with method=REQUEST unquoted and no CTE.
 
-    MIME structure that triggers Gmail's inline calendar widget:
-      multipart/mixed
-        multipart/alternative       <- Gmail picks the richest inline part
-          text/plain
-          text/calendar; method=REQUEST   <- must be inline, unencoded, method unquoted
-        application/ics (attachment)     <- for Outlook / Apple Calendar download
+    Uses MIMEBase + manual Content-Type header because MIMEText with
+    charset='utf-8' (a) base64-encodes the payload and (b) quotes the method
+    parameter as method="REQUEST" -- both of which prevent Gmail from
+    rendering the RSVP banner.
+    """
+    part = MIMEBase("text", "calendar")
+    del part["Content-Type"]
+    ct = "text/calendar; method=REQUEST; charset=UTF-8"
+    if filename:
+        ct += f'; name="{filename}"'
+    part["Content-Type"] = ct
+    part["Content-Class"] = "urn:content-classes:calendarmessage"
+    if filename:
+        part["Content-Disposition"] = f'attachment; filename="{filename}"'
+    else:
+        part["Content-Disposition"] = disposition
+    part.set_payload(ics_folded)   # plain text payload — no base64 encoding
+    return part
+
+
+def build_invite_message(*, sender: str, to_list: list[str], subject: str,
+                          body_text: str, ics_text: str, ics_filename: str) -> str:
+    """Build and return the raw RFC-2822 MIME message bytes (base64url-encoded).
+
+    MIME structure Gmail requires for the RSVP banner:
+
+      multipart/mixed                           (outer)
+        multipart/alternative                   (Gmail picks richest inline part)
+          text/plain; charset=UTF-8
+          text/calendar; method=REQUEST; charset=UTF-8   ← inline, no base64
+        text/calendar; method=REQUEST; charset=UTF-8     ← attachment for download
+          Content-Disposition: attachment; filename="jobwalk-NNN.ics"
+
+    IMPORTANT — why the self-send RSVP banner doesn't appear:
+      Gmail unconditionally suppresses the Yes/Maybe/No RSVP banner when the
+      From: address matches the To: address (same Gmail account). This is a
+      hard Gmail server-side rule that cannot be overridden via MIME headers,
+      ICS ORGANIZER, or any other client-side technique. The invite IS
+      delivered correctly; Gmail just doesn't render the banner for self-mail.
+      To verify the banner works: send to a DIFFERENT Fusion email (jade@,
+      gabriel.toler@, etc.) — those recipients will see the full RSVP widget.
     """
     ics_folded = _fold_ics(ics_text)
 
-    # --- text/calendar part -------------------------------------------------
-    # Build with MIMEBase so we can set the Content-Type header manually.
-    # MIMEText with charset='utf-8' auto-applies base64 encoding AND quotes
-    # the method parameter (method="REQUEST") -- both prevent Gmail from
-    # showing the RSVP banner.  Setting the header as a raw string avoids
-    # both problems.
-    cal = MIMEBase("text", "calendar")
-    del cal["Content-Type"]                              # remove auto-set header
-    cal["Content-Type"] = "text/calendar; method=REQUEST; charset=UTF-8"
-    cal["Content-Disposition"] = "inline"              # must be inline for Gmail
-    cal["Content-Class"] = "urn:content-classes:calendarmessage"
-    cal.set_payload(ics_folded)                        # plain text, no base64
+    # Inline calendar part — Gmail reads this to decide whether to show banner
+    cal_inline = _make_cal_part(ics_folded, disposition="inline")
 
-    # --- multipart/alternative: text body + calendar part -------------------
+    # multipart/alternative: plain text + inline calendar
     alt = MIMEMultipart("alternative")
     alt.attach(MIMEText(body_text, "plain", "utf-8"))
-    alt.attach(cal)
+    alt.attach(cal_inline)
 
-    # --- .ics file attachment (for Outlook / Apple Calendar) ----------------
-    ics_attach = MIMEApplication(ics_folded.encode("utf-8"), _subtype="octet-stream")
-    ics_attach.add_header("Content-Disposition", "attachment", filename=ics_filename)
-    ics_attach.add_header("Content-Type", "application/ics", name=ics_filename)
+    # text/calendar attachment — Outlook / Apple Calendar / Android download
+    cal_attach = _make_cal_part(ics_folded, disposition="attachment", filename=ics_filename)
 
-    # --- outer multipart/mixed ----------------------------------------------
+    # Outer multipart/mixed
     msg = MIMEMultipart("mixed")
     msg["From"] = sender
     msg["To"] = ", ".join(to_list)
     msg["Subject"] = subject
     msg["Content-Class"] = "urn:content-classes:calendarmessage"
     msg.attach(alt)
-    msg.attach(ics_attach)
+    msg.attach(cal_attach)
 
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+
+
+def send_invite(svc, *, sender, to_list, subject, body_text, ics_text, ics_filename,
+                dump_mime: bool = False):
+    raw = build_invite_message(
+        sender=sender, to_list=to_list, subject=subject,
+        body_text=body_text, ics_text=ics_text, ics_filename=ics_filename,
+    )
+    if dump_mime:
+        import base64 as _b64
+        print("=== RAW MIME (first 3000 chars) ===")
+        print(_b64.urlsafe_b64decode(raw).decode("utf-8", errors="replace")[:3000])
+        print("=== END RAW MIME ===")
     svc.users().messages().send(userId="me", body={"raw": raw}).execute()
 
 
