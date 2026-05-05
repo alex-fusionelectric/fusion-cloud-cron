@@ -721,9 +721,16 @@ def send_alert(svc, sender: str, recipient: str,
         if det.get("found_in_folder"): srcs.append("Folder")
         if det.get("found_in_sbx"):    srcs.append("SBX")
         if not srcs: srcs = ["unknown source"]
+        # Format detected date MM/DD/YYYY from ISO updated_at
+        raw_dt = det.get("updated_at") or det.get("detected_at") or ""
+        try:
+            from datetime import datetime as _dt
+            det_date = _dt.fromisoformat(raw_dt.replace("Z","+00:00")).strftime("%-m/%-d/%Y")
+        except Exception:
+            det_date = raw_dt[:10] if raw_dt else "unknown"
         lines.append(
             f"  - EST# {bid.get('est_number')} {bid.get('project_name')[:40]}\n"
-            f"    Addendum #{det['addendum_number']}\n"
+            f"    Addendum #{det['addendum_number']}  (detected {det_date})\n"
             f"    Sources: {', '.join(srcs)}\n"
             f"    Mismatch: {'YES (manual reconcile needed)' if len(srcs) == 1 else 'no -- both sources have it'}"
         )
