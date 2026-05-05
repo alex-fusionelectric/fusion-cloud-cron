@@ -24,6 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from email.mime.application import MIMEApplication
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -303,18 +304,67 @@ def gmail_service():
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
+def _fold_ics(ics: str) -> str:
+    """Fold ICS lines at 75 octets per RFC 5545 §3.1 (CRLF + single SPACE)."""
+    out = []
+    for line in ics.replace("\r\n", "\n").split("\n"):
+        encoded = line.encode("utf-8")
+        if len(encoded) <= 75:
+            out.append(line + "\r\n")
+            continue
+        out.append(encoded[:75].decode("utf-8", "replace"))
+        encoded = encoded[75:]
+        while encoded:
+            out.append("\r\n " + encoded[:74].decode("utf-8", "replace"))
+            encoded = encoded[74:]
+        out.append("\r\n")
+    return "".join(out)
+
+
 def send_invite(svc, *, sender, to_list, subject, body_text, ics_text, ics_filename):
+    """Send a calendar invite that Gmail renders with the Yes/Maybe/No RSVP banner.
+
+    MIME structure that triggers Gmail's inline calendar widget:
+      multipart/mixed
+        multipart/alternative       <- Gmail picks the richest inline part
+          text/plain
+          text/calendar; method=REQUEST   <- must be inline, unencoded, method unquoted
+        application/ics (attachment)     <- for Outlook / Apple Calendar download
+    """
+    ics_folded = _fold_ics(ics_text)
+
+    # --- text/calendar part -------------------------------------------------
+    # Build with MIMEBase so we can set the Content-Type header manually.
+    # MIMEText with charset='utf-8' auto-applies base64 encoding AND quotes
+    # the method parameter (method="REQUEST") -- both prevent Gmail from
+    # showing the RSVP banner.  Setting the header as a raw string avoids
+    # both problems.
+    cal = MIMEBase("text", "calendar")
+    del cal["Content-Type"]                              # remove auto-set header
+    cal["Content-Type"] = "text/calendar; method=REQUEST; charset=UTF-8"
+    cal["Content-Disposition"] = "inline"              # must be inline for Gmail
+    cal["Content-Class"] = "urn:content-classes:calendarmessage"
+    cal.set_payload(ics_folded)                        # plain text, no base64
+
+    # --- multipart/alternative: text body + calendar part -------------------
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(body_text, "plain", "utf-8"))
+    alt.attach(cal)
+
+    # --- .ics file attachment (for Outlook / Apple Calendar) ----------------
+    ics_attach = MIMEApplication(ics_folded.encode("utf-8"), _subtype="octet-stream")
+    ics_attach.add_header("Content-Disposition", "attachment", filename=ics_filename)
+    ics_attach.add_header("Content-Type", "application/ics", name=ics_filename)
+
+    # --- outer multipart/mixed ----------------------------------------------
     msg = MIMEMultipart("mixed")
     msg["From"] = sender
     msg["To"] = ", ".join(to_list)
     msg["Subject"] = subject
-    msg.attach(MIMEText(body_text, "plain", "utf-8"))
-    cal = MIMEText(ics_text, "calendar; method=REQUEST", "utf-8")
-    cal.add_header("Content-Class", "urn:content-classes:calendarmessage")
-    msg.attach(cal)
-    ics_attach = MIMEApplication(ics_text.encode("utf-8"), _subtype="ics")
-    ics_attach.add_header("Content-Disposition", "attachment", filename=ics_filename)
+    msg["Content-Class"] = "urn:content-classes:calendarmessage"
+    msg.attach(alt)
     msg.attach(ics_attach)
+
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
     svc.users().messages().send(userId="me", body={"raw": raw}).execute()
 
