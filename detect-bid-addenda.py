@@ -394,10 +394,30 @@ def find_sbx_for_bid(bid: dict, sbx_by_id: dict, sbx_all: list[dict]) -> dict | 
 
 def scan_sbx_addenda(bid: dict, sbx_by_id: dict, sbx_all: list[dict]) -> tuple[int, dict | None]:
     """For an active bid, return (addenda_count, sbx_row_used). Both 0 / None
-    if no SBX listing matches."""
+    if no SBX listing matches.
+
+    SBX's raw `payload.addenda` field counts EVERY entry in the Addenda &
+    Updates table including Pre Bid Conference sign-in sheets, which are NOT
+    real addenda. We prefer sbx_project_details_cloud.addenda_count which is
+    parsed from the actual numbered addendum rows only. If that table has a
+    row for this opsplannum, use it; otherwise fall back to the raw count.
+    """
     sbx = find_sbx_for_bid(bid, sbx_by_id, sbx_all)
     if not sbx:
         return 0, None
+
+    # Prefer the parsed count from sbx_project_details_cloud (numbered addenda only)
+    opsplannum = sbx.get("opsplannum") or ""
+    if opsplannum:
+        st, body = _sb("GET",
+            f"sbx_project_details_cloud?select=addenda_count&id=eq.{urllib.parse.quote(opsplannum, safe='')}&limit=1")
+        if st == 200:
+            rows = json.loads(body)
+            if rows and rows[0].get("addenda_count") is not None:
+                n = int(rows[0]["addenda_count"])
+                return n, sbx
+
+    # Fallback: raw SBX listing field (may include Pre Bid Conference entries)
     payload = sbx.get("payload") or {}
     n = _parse_addenda_count(payload.get("addenda"))
     return n, sbx
