@@ -28,6 +28,7 @@ import http.cookiejar
 import io
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -166,9 +167,28 @@ def parse_workbook(xlsm_bytes):
     }
 
 
+# Matches =HYPERLINK("url", "display") or =HYPERLINK("url"). Tolerates
+# leading/trailing whitespace and case differences. Captures the URL only.
+_HYPERLINK_FORMULA_RX = re.compile(r'^\s*=\s*HYPERLINK\s*\(\s*"([^"]+)"', re.IGNORECASE)
+
+
 def _hyperlink_map_from_bytes(xlsm_bytes_io):
     """In-memory equivalent of sync-bid-list.py:_build_documents_url_map.
-    Same sheet/column/row offsets so the output keys + URLs match."""
+    Same sheet/column/row offsets so the output keys + URLs match.
+
+    Two-pass scan per row:
+      1. Native Hyperlink object on the project-name cell (the standard
+         "right-click > Edit Hyperlink" path that Excel uses by default).
+      2. Fallback: =HYPERLINK("url","text") formula in the cell. Some
+         users (and our xlwings tooling when COM Hyperlinks.Add 500s on
+         OneDrive-hosted workbooks) write the link this way instead.
+         Without this fallback, the cron would see "no hyperlink" on
+         such cells and wipe documents_url to NULL on every sync.
+
+    For the formula path we need a separate workbook load with
+    data_only=False so cell.value returns the formula text instead of
+    the calculated display string.
+    """
     out = {}
     sheet_configs = [
         ("BIDS",       8, "B", "C"),
@@ -180,22 +200,44 @@ def _hyperlink_map_from_bytes(xlsm_bytes_io):
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] could not open workbook for hyperlink scan: {exc}")
         return out
+
+    # Second pass needs the same bytes but in formula-mode. Rewind the
+    # BytesIO so the second load sees the start of the file.
+    formula_wb = None
+    try:
+        if hasattr(xlsm_bytes_io, "seek"):
+            xlsm_bytes_io.seek(0)
+        formula_wb = openpyxl.load_workbook(xlsm_bytes_io, data_only=False)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] could not open workbook for HYPERLINK-formula fallback: {exc}")
+
     for sheet_name, data_start, name_col, est_col in sheet_configs:
         if sheet_name not in wb.sheetnames:
             continue
         ws = wb[sheet_name]
+        ws_formula = formula_wb[sheet_name] if (formula_wb is not None and sheet_name in formula_wb.sheetnames) else None
         for row in range(data_start, ws.max_row + 1):
             name_cell = ws[f"{name_col}{row}"]
             est_cell  = ws[f"{est_col}{row}"]
-            if not name_cell.hyperlink:
-                continue
             est = str(est_cell.value or "").strip().upper()
             if not est:
                 continue
-            url = name_cell.hyperlink.target
+            # Pass 1: native Hyperlink object.
+            url = None
+            if name_cell.hyperlink and name_cell.hyperlink.target:
+                url = name_cell.hyperlink.target
+            # Pass 2: HYPERLINK() formula fallback.
+            elif ws_formula is not None:
+                raw = ws_formula[f"{name_col}{row}"].value
+                if isinstance(raw, str):
+                    m = _HYPERLINK_FORMULA_RX.match(raw)
+                    if m:
+                        url = m.group(1)
             if url and est not in out:
                 out[est] = url
     wb.close()
+    if formula_wb is not None:
+        formula_wb.close()
     return out
 
 
@@ -255,17 +297,19 @@ def _bid_to_row(bid, generated_at):
 
 
 def write_to_supabase(output, *, batch_size=200):
-    """Truncate-and-insert pattern, same shape Push-ToSupabase.ps1 uses for
-    dave_bids. Simpler than upsert-on-conflict and the table is small
-    enough (1853 rows ~ 2 MB) that a full replace is fine.
-
-    On any failure mid-batch we leave whatever we wrote in place rather
-    than rolling back -- the next cron tick (5 min away) will retry the
-    whole sweep. Loud failures are better than silent partial state.
+    """Upsert-then-purge pattern: ON CONFLICT (id) DO UPDATE so the table
+    is never empty mid-run, then delete any row whose updated_at predates
+    this run (meaning it was removed from the source workbook).
     """
     key = _resolve_service_key()
     api = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
-    headers = {
+    headers_upsert = {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+        "Prefer":        "resolution=merge-duplicates,return=minimal",
+    }
+    headers_delete = {
         "apikey":        key,
         "Authorization": f"Bearer {key}",
         "Content-Type":  "application/json",
@@ -276,31 +320,14 @@ def write_to_supabase(output, *, batch_size=200):
     generated_at = output.get("generatedAt")
     rows = [_bid_to_row(b, generated_at) for b in bids]
 
-    # 1. Delete every row. PostgREST rejects bare DELETE without a filter,
-    # so we filter "id is not null" which matches every row.
-    print(f"Clearing existing rows in public.{SUPABASE_TABLE}...")
-    req = urllib.request.Request(
-        api + "?id=not.is.null",
-        method="DELETE",
-        headers=headers,
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status not in (200, 204):
-                raise SystemExit(f"DELETE failed: HTTP {resp.status}")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"DELETE failed: HTTP {e.code} {body}")
-
-    # 2. Bulk insert in batches. PostgREST accepts arrays of rows; we
-    # batch to keep the body under typical proxy limits and to avoid a
-    # single 2 MB request hanging if the network burps.
-    print(f"Inserting {len(rows)} row(s) in batches of {batch_size}...")
+    # 1. Upsert all rows. Every row carries updated_at = generated_at so
+    # the stale-purge step below can identify rows not in this run.
+    print(f"Upserting {len(rows)} row(s) in batches of {batch_size}...")
     sent = 0
     for i in range(0, len(rows), batch_size):
         chunk = rows[i:i + batch_size]
         body = json.dumps(chunk).encode("utf-8")
-        req = urllib.request.Request(api, method="POST", headers=headers, data=body)
+        req = urllib.request.Request(api, method="POST", headers=headers_upsert, data=body)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 if resp.status not in (200, 201, 204):
@@ -311,6 +338,20 @@ def write_to_supabase(output, *, batch_size=200):
         sent += len(chunk)
         print(f"  ... {sent}/{len(rows)}")
     print(f"Wrote {sent} row(s) to public.{SUPABASE_TABLE}.")
+
+    # 2. Purge stale rows (bids removed from the workbook since last run).
+    # Rows from this run have updated_at == generated_at; anything older
+    # was not present in the latest parse.
+    stale_url = api + "?updated_at=neq." + urllib.parse.quote(generated_at, safe="")
+    req = urllib.request.Request(stale_url, method="DELETE", headers=headers_delete)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status not in (200, 204):
+                raise SystemExit(f"DELETE stale failed: HTTP {resp.status}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"DELETE stale failed: HTTP {e.code} {body}")
+    print(f"Purged stale rows (updated_at != {generated_at}).")
 
 
 def main():
