@@ -85,14 +85,38 @@ def _sb(method, path, body=None, extra=None, timeout=30):
         return e.code, e.read()
 
 
-def download_xlsm(url: str) -> str:
+def download_xlsm(share_url: str) -> str:
+    """Download an OneDrive/SharePoint share link's xlsm. Personal share
+    URLs require &download=1 to skip the web preview AND a cookie jar to
+    follow the auth redirect chain — without both we get the 55KB HTML
+    sign-in page back. Mirrors the proven fetcher in cloud-sync-bid-list.py."""
+    import http.cookiejar
+    sep = "&" if "?" in share_url else "?"
+    url = share_url + sep + "download=1"
     fd, path = tempfile.mkstemp(suffix=".xlsm")
     os.close(fd)
-    print(f"Downloading PROJECT LIST.xlsm to {path} ...")
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=180) as r, open(path, "wb") as f:
+    print("Downloading PROJECT LIST.xlsm via SharePoint share link...")
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cookie_jar),
+        urllib.request.HTTPRedirectHandler(),
+    )
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (FusionCloudCron sync-side-jobs)",
+        "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,*/*",
+    })
+    with opener.open(req, timeout=180) as r, open(path, "wb") as f:
+        total = 0
         while chunk := r.read(1 << 20):
             f.write(chunk)
+            total += len(chunk)
+    # Sanity: xlsx/xlsm are zip files starting with 0x504B0304 ("PK\x03\x04").
+    with open(path, "rb") as f:
+        magic = f.read(4)
+    if magic[:2] != b"PK":
+        raise SystemExit(f"Downloaded file is not an xlsm (got {magic!r}). "
+                         f"Share URL likely returned HTML; check PROJECT_LIST_URL secret.")
+    print(f"  downloaded {total} bytes")
     return path
 
 

@@ -32,14 +32,18 @@ from dropbox.exceptions import ApiError  # type: ignore
 
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 
-# Dropbox roots to walk for project folders. Each project lives in its own
-# folder; the BB xlsm is typically in the folder root or a "BID BREAKDOWN"
-# subfolder. Adjust if the folder layout changes.
-PROJECT_ROOTS = [
-    "/Fusion Electric Folder/03- PROJECTS",
-    "/Fusion Electric Folder/03- PROJECTS - BAY",
-    "/Fusion Electric Folder/03- PROJECTS - SAC",
-]
+# Dropbox layout for ACTIVE projects (per real path Alex confirmed
+# 2026-05-08):
+#   /Fusion Electric Folder/01- PROJECTS/BAY PROJECTS/<full_number>-<NAME>/
+#                                                    /01- <short#> CONTRACTS & CO'S/
+#                                                                       BID BREAKDOWN*.xlsm
+# Example:
+#   /Fusion Electric Folder/01- PROJECTS/BAY PROJECTS/2611-BAY-FUSD CAB, GLEN, PATT HVAC/
+#       01- 2611 CONTRACTS & CO'S/BID BREAKDOWN - V10.49 - FUSD CAB GLEN PATT ES HVAC.xlsm
+PROJECT_ROOTS = {
+    "BAY": "/Fusion Electric Folder/01- PROJECTS/BAY PROJECTS",
+    "SAC": "/Fusion Electric Folder/01- PROJECTS/SAC PROJECTS",
+}
 # Filename patterns that identify the BB. We try both common spellings.
 BB_FILE_PATTERNS = [
     re.compile(r"^BID\s*BREAKDOWN.*\.xlsm$", re.IGNORECASE),
@@ -97,20 +101,23 @@ def dropbox_client() -> dropbox.Dropbox:
 
 
 def fetch_active_projects() -> list[dict]:
-    """Pull active projects from projects_cloud (jobListStatus CURRENT/READY/NO LABOR YET)
-    plus side jobs from side_jobs_cloud. Skips ones already in project_locations_cloud."""
-    # 1. Active main jobs from PROJECT LIST
+    """Pull active projects from projects_cloud (jobListStatus CURRENT/READY/NO LABOR YET).
+    Skips ones already in project_locations_cloud. Returns full_number plus
+    the originalEstNumber (e.g. "26-228") so we can locate the project's
+    EST folder under /02- ESTIMATING/002- SENT ESTIMATES."""
     st, body = _sb("GET", "projects_cloud?select=full_number,project_name,division,payload&full_number=not.is.null")
     main = []
     if st == 200:
         for r in json.loads(body):
-            jls = ((r.get("payload") or {}).get("jobListStatus") or "").upper()
+            pl = r.get("payload") or {}
+            jls = (pl.get("jobListStatus") or "").upper()
             if jls not in ("CURRENT", "READY TO CLOSE", "NO LABOR YET"):
                 continue
             main.append({
                 "full_number": r["full_number"],
                 "project_name": r.get("project_name") or "",
                 "division": (r.get("division") or "").upper(),
+                "est_number": (pl.get("originalEstNumber") or pl.get("estNumber") or "").strip(),
             })
 
     # 2. Skip rows already in project_locations_cloud
@@ -139,42 +146,61 @@ def list_dbx_folder(dbx: dropbox.Dropbox, path: str) -> list:
     return entries
 
 
-def find_project_folder(dbx, full_number: str, project_name: str) -> str | None:
-    """Locate the Dropbox folder for a given project. We search each known
-    PROJECT_ROOTS for an entry whose name starts with the job number prefix
-    (e.g. "2611-BAY" -> we look for any folder name starting "2611")."""
-    short = full_number.split("-")[0]   # "2611-BAY" -> "2611"
-    for root in PROJECT_ROOTS:
-        for entry in list_dbx_folder(dbx, root):
-            if not isinstance(entry, dropbox.files.FolderMetadata): continue
-            nm = entry.name.upper()
-            if nm.startswith(short.upper()) or nm.startswith(full_number.upper()):
-                return entry.path_lower
+def find_project_folder(dbx, full_number: str, project_name: str, division: str) -> str | None:
+    """Project folders are named "<full_number>-<NAME>" (e.g.
+    "2611-BAY-FUSD CAB, GLEN, PATT HVAC") under the division root.
+    Match on the full_number prefix."""
+    root = PROJECT_ROOTS.get(division.upper())
+    if not root:
+        return None
+    needle = full_number.upper() + "-"   # trailing dash forces exact prefix
+    for entry in list_dbx_folder(dbx, root):
+        if not isinstance(entry, dropbox.files.FolderMetadata): continue
+        if entry.name.upper().startswith(needle):
+            return entry.path_lower
     return None
 
 
 def find_bb_file(dbx, folder_path: str) -> str | None:
-    """Find the BID BREAKDOWN xlsm inside a project folder. Searches the
-    folder root + any "BID BREAKDOWN" sub-folder."""
-    candidates = []
+    """The BB lives one level deep, in the "01- <short#> CONTRACTS & CO'S"
+    subfolder of the project folder. We walk the project folder's
+    immediate children, find any subfolder containing "CONTRACTS" + check
+    inside for a "BID BREAKDOWN*.xlsm" filename. Falls back to scanning
+    the project folder root + every other subfolder if the convention
+    isn't followed for a particular project."""
+    def files_in(path: str) -> list[str]:
+        out = []
+        for entry in list_dbx_folder(dbx, path):
+            if isinstance(entry, dropbox.files.FileMetadata):
+                for pat in BB_FILE_PATTERNS:
+                    if pat.match(entry.name):
+                        out.append(entry.path_lower)
+                        break
+        return out
+
+    # 1. Preferred: walk into "*CONTRACTS*" subfolder
+    contracts_subs = []
+    other_subs = []
     for entry in list_dbx_folder(dbx, folder_path):
-        if isinstance(entry, dropbox.files.FileMetadata):
-            for pat in BB_FILE_PATTERNS:
-                if pat.match(entry.name):
-                    candidates.append(entry.path_lower)
-                    break
-        elif isinstance(entry, dropbox.files.FolderMetadata):
-            sub = entry.name.upper()
-            if "BID BREAKDOWN" in sub or sub == "BB":
-                # Also check inside this subfolder
-                for sentry in list_dbx_folder(dbx, entry.path_lower):
-                    if isinstance(sentry, dropbox.files.FileMetadata):
-                        for pat in BB_FILE_PATTERNS:
-                            if pat.match(sentry.name):
-                                candidates.append(sentry.path_lower)
-                                break
-    # Prefer files whose name contains an EST# pattern (our naming convention)
-    candidates.sort(key=lambda p: ("EST" in p.upper(), len(p)), reverse=True)
+        if isinstance(entry, dropbox.files.FolderMetadata):
+            if "CONTRACTS" in entry.name.upper():
+                contracts_subs.append(entry.path_lower)
+            else:
+                other_subs.append(entry.path_lower)
+
+    candidates = []
+    for sub in contracts_subs:
+        candidates.extend(files_in(sub))
+    if not candidates:
+        # 2. Fallback: project folder root
+        candidates.extend(files_in(folder_path))
+    if not candidates:
+        # 3. Last resort: any other subfolder
+        for sub in other_subs:
+            candidates.extend(files_in(sub))
+            if candidates: break
+    # Pick the shortest path (likely the canonical, non-archived copy)
+    candidates.sort(key=len)
     return candidates[0] if candidates else None
 
 
@@ -250,8 +276,9 @@ def main():
     found = 0
     for i, p in enumerate(targets, 1):
         fn = p["full_number"]
-        print(f"[{i}/{len(targets)}] {fn:14s} {p['project_name'][:35]:35s}", end=" ")
-        folder = find_project_folder(dbx, fn, p["project_name"])
+        div = (p.get("division") or "").upper()
+        print(f"[{i}/{len(targets)}] {fn:14s} {div:3s} {p['project_name'][:35]:35s}", end=" ")
+        folder = find_project_folder(dbx, fn, p["project_name"], div)
         if not folder:
             print("→ folder not found")
             continue
