@@ -1,0 +1,35 @@
+name: Sync side jobs
+
+# Pulls individual side jobs from PROJECT LIST.xlsm's per-year tabs
+# (2699B, 2699S, 2599B, etc.) into public.side_jobs_cloud, filtered to
+# JOB STATUS = CURRENT only. Anything COMPLETE / NO BILLING / INVOICE
+# SENT / blank disappears from the table on the next run.
+#
+# Same cadence as sync-project-list.yml so the side-jobs picker in the
+# Field Panel stays roughly in lockstep with the rest of the project data.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-side-jobs
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install openpyxl
+      - name: Sync side jobs
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PROJECT_LIST_URL:     ${{ secrets.PROJECT_LIST_URL }}
+        run: python sync-side-jobs.py
