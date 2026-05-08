@@ -144,7 +144,30 @@ def kv_upsert(key, value):
     return status in (200, 201, 204)
 
 
+def load_dismissed_ids():
+    """Fetch IDs of rows already dismissed (is_invitation=false) so we don't
+    resurrect them. Without this, the cron re-upserts dismissed rows with
+    is_invitation=true and they reappear in Bid Radar after the user removed
+    them."""
+    status, body = _sb_request("GET", f"{INVITATIONS_TABLE}?select=id&is_invitation=eq.false")
+    if status != 200:
+        return set()
+    try:
+        return {r["id"] for r in json.loads(body)}
+    except Exception:
+        return set()
+
+
 def upsert_invitations(rows):
+    if not rows:
+        return 0
+    dismissed = load_dismissed_ids()
+    if dismissed:
+        before = len(rows)
+        rows = [r for r in rows if r["id"] not in dismissed]
+        skipped = before - len(rows)
+        if skipped:
+            print(f"  [skip] {skipped} row(s) already user-dismissed (is_invitation=false)")
     if not rows:
         return 0
     status, resp = _sb_request(
