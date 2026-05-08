@@ -1,0 +1,29 @@
+name: Geocode project addresses
+
+# Resolves any project_locations_cloud rows where lat IS NULL using
+# Nominatim (OpenStreetMap) — free, no API key, 1 req/sec rate limit.
+# Runs nightly + on demand.
+
+on:
+  schedule:
+    - cron: "30 10 * * *"   # 10:30 UTC = 03:30 Pacific (after BB scrape)
+  workflow_dispatch: {}
+
+concurrency:
+  group: geocode-project-addresses
+  cancel-in-progress: false
+
+jobs:
+  geocode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Geocode addresses
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python geocode-project-addresses.py
