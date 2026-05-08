@@ -28,7 +28,8 @@ from datetime import datetime, timezone
 
 import dropbox  # type: ignore
 import openpyxl  # type: ignore
-from dropbox.exceptions import ApiError  # type: ignore
+from dropbox import common as dropbox_common  # type: ignore
+from dropbox.exceptions import ApiError, AuthError  # type: ignore
 
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 
@@ -92,12 +93,25 @@ def _sb(method, path, body=None, extra=None, timeout=30):
 
 
 def dropbox_client() -> dropbox.Dropbox:
+    """Configure for the TEAM root namespace — Fusion folders live there,
+    not in the auth user's personal namespace. Mirrors cloud-sync-prequal."""
     rt = os.environ.get("DROPBOX_REFRESH_TOKEN")
     ak = os.environ.get("DROPBOX_APP_KEY")
     asec = os.environ.get("DROPBOX_APP_SECRET")
     if not (rt and ak and asec):
         raise SystemExit("DROPBOX_REFRESH_TOKEN/APP_KEY/APP_SECRET env vars required.")
-    return dropbox.Dropbox(oauth2_refresh_token=rt, app_key=ak, app_secret=asec)
+    dbx = dropbox.Dropbox(oauth2_refresh_token=rt, app_key=ak, app_secret=asec, timeout=60)
+    try:
+        acct = dbx.users_get_current_account()
+    except AuthError as e:
+        raise SystemExit(f"Dropbox auth failed: {e}")
+    ri = acct.root_info
+    root_ns = getattr(ri, "root_namespace_id", None)
+    home_ns = getattr(ri, "home_namespace_id", None)
+    if root_ns and root_ns != home_ns:
+        dbx = dbx.with_path_root(dropbox_common.PathRoot.root(root_ns))
+        print(f"Using team root namespace {root_ns}")
+    return dbx
 
 
 def fetch_active_projects() -> list[dict]:

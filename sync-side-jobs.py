@@ -132,12 +132,17 @@ def _num(v):
         return None
 
 
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 def _date(v):
+    """Return YYYY-MM-DD or None. Excel cells sometimes carry "00:00:00"
+    when only a time was entered without a date — Postgres rejects that
+    as a DATE; we filter it out instead of letting the insert fail."""
     if v is None: return None
     if isinstance(v, datetime):
         return v.date().isoformat()
     s = _str(v)
-    return s[:10] if s else None
+    if not s: return None
+    return s[:10] if _ISO_DATE_RE.match(s) else None
 
 
 def parse_tab(ws, tab_name: str, year: int, division: str) -> list[dict]:
