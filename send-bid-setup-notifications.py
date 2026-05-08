@@ -202,9 +202,10 @@ def render_email_body(row: dict) -> tuple[str, str]:
 
 
 def send_notification(svc, sender: str, row: dict) -> None:
-    recipients = [r for r in (row.get("notify_recipients") or []) if r]
-    if not recipients:
-        recipients = [sender]
+    # Per Alex 2026-05-08: Alex-only recipients across ALL email paths
+    # (watcher inline, Netlify function, and this cron fallback) until the
+    # pipeline is stable. Override whatever's stored on the completion row.
+    recipients = ["alex@fusionelectric-inc.com"]
     plain, html = render_email_body(row)
     subject = f"Bid setup complete: EST# {row.get('est_number') or '?'} {row.get('project_name') or ''}"
     msg = MIMEMultipart("alternative")

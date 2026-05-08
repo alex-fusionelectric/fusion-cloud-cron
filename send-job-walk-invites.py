@@ -449,16 +449,10 @@ def main():
         if dedup_id in already_sent or legacy_dedup_id in already_sent:
             continue
 
-        # Recipients: Alex + assigned PE only.
-        # Estimator is excluded from job-walk invites per Alex 2026-05-05.
-        # Estimator still appears in the email body as project context.
-        recipients = set(ALWAYS_INVITE)
-        pe_name = b.get("project_engineer")
-        if pe_name:
-            pe_email = NAME_TO_EMAIL.get(str(pe_name).strip())
-            if pe_email:
-                recipients.add(pe_email)
-        recipients = sorted(recipients)
+        # Recipients: Alex ONLY for now (per Alex 2026-05-08, while bugs
+        # are still being shaken out). Was Alex + PE. Estimator never
+        # included. PE will get added back once Alex says go.
+        recipients = ["alex@fusionelectric-inc.com"]
 
         est = b.get("est_number") or "?"
         project = b.get("project_name") or "(untitled)"
