@@ -48,11 +48,17 @@ CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 # fail token refresh with `invalid_scope` (Google treats scope strings as
 # discrete identifiers, not a hierarchy).
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+# Window kept narrow now that the historical backlog is fully backfilled in
+# Supabase. Each cron tick should only sweep recent mail. The dedup check
+# against prequal_approvals_cloud below means even messages inside this
+# window are only classified by Claude on the FIRST run that sees them.
+# If you ever need to re-run a historical sweep, set BACKFILL_DAYS or
+# temporarily widen `newer_than` here.
 GMAIL_QUERY = (
     'from:kim@fusionelectric-inc.com '
     '(subject:prequal OR subject:"Pre-Qualification" OR subject:"pre-qualification" '
     'OR "approved to bid" OR "Approval" OR "expir" OR "renewed" OR "rescind") '
-    'newer_than:730d'
+    'newer_than:30d'
 )
 
 
@@ -185,7 +191,32 @@ Body (truncated to 6000 chars):
         return None
 
 
-# --- Supabase upsert --------------------------------------------------------
+# --- Supabase upsert + dedup ------------------------------------------------
+
+def load_existing_message_ids():
+    """Pull the set of Gmail message IDs already classified into
+    prequal_approvals_cloud. Used to skip Claude calls on messages we've
+    already processed — the script is idempotent (upsert by id), but
+    re-classifying is pure token waste once a row exists.
+
+    Returns an empty set on any error so the script falls back to
+    full-classify behavior (correctness preserved over efficiency).
+    """
+    key = (os.environ.get("SUPABASE_SERVICE_KEY") or "").strip()
+    if not key:
+        return set()
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}?select=id"
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status != 200:
+                return set()
+            return {row.get("id") for row in json.loads(resp.read()) if row.get("id")}
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] could not load existing IDs for dedup: {e}")
+        return set()
+
 
 def supabase_upsert(rows):
     key = (os.environ.get("SUPABASE_SERVICE_KEY") or "").strip()
@@ -239,8 +270,22 @@ def main():
             break
     print(f"Found {len(candidates)} candidate messages.")
 
+    # Pre-load already-classified Gmail IDs so we can skip Claude on
+    # messages whose row already exists. Once a prequal email is in
+    # Supabase its content doesn't change — re-asking Haiku is pure waste.
+    # If Supabase is unreachable we fall back to an empty set (full classify).
+    existing_ids = load_existing_message_ids()
+    print(f"Skipping {len(existing_ids)} message(s) already classified in {SUPABASE_TABLE}.")
+
     rows = []
+    skipped_existing = 0
     for i, m in enumerate(candidates, 1):
+        # Cheap dedup: if we've already classified this exact Gmail
+        # message before, skip it without even fetching the full body.
+        # Saves a Gmail API roundtrip AND a Claude call.
+        if m["id"] in existing_ids:
+            skipped_existing += 1
+            continue
         full = svc.users().messages().get(userId="me", id=m["id"], format="full").execute()
         headers = {h["name"].lower(): h["value"] for h in full.get("payload", {}).get("headers", [])}
         subject = headers.get("subject", "")
@@ -305,14 +350,31 @@ def main():
     # the same legal entity, then write the validated set onto the prequal
     # row. Frontend matches by exact membership, so wrong matches like
     # SAMTRANS lighting up because of "San Mateo" overlap are eliminated.
-    print(f"\nCross-referencing prequal agencies vs current SBX listings via Claude...")
-    cross_reference_sbx_owners(api_key)
+    #
+    # Skip the entire block when no new rows were inserted this run AND
+    # we aren't being asked to force a refresh — without new prequal rows
+    # there's nothing to validate that wasn't validated last run. SBX-owner
+    # drift is handled by clearing validated_owner_strings manually when
+    # the SBX taxonomy changes meaningfully.
+    force = bool(int(os.environ.get("PREQUAL_FORCE_REVALIDATE", "0") or "0"))
+    if not rows and not force:
+        print("\nNo new prequal rows this run — skipping SBX cross-reference (set PREQUAL_FORCE_REVALIDATE=1 to override).")
+    else:
+        print(f"\nCross-referencing prequal agencies vs current SBX listings via Claude...")
+        cross_reference_sbx_owners(api_key, force=force)
 
 
-def cross_reference_sbx_owners(api_key):
+def cross_reference_sbx_owners(api_key, *, force=False):
     """Build prequal_approvals_cloud.validated_owner_strings by asking
     Claude which SBX owner_agency strings actually refer to each prequal
-    agency. Only validates ACTIVE prequals (approved/renewed)."""
+    agency. Only validates ACTIVE prequals (approved/renewed).
+
+    Per-row dedup: skip prequals whose validated_owner_strings is already
+    populated. Once a prequal is validated against the SBX corpus, the
+    answer doesn't change unless either (a) the prequal's canonical
+    agency_name changes — would be a new row anyway via dedup-by-id —
+    or (b) SBX owners drift enough to warrant re-validation, which the
+    caller signals via force=True (PREQUAL_FORCE_REVALIDATE=1)."""
     # 1) Pull every distinct SBX owner_agency for electrical-flagged listings.
     qs = "select=owner_agency&is_electrical=eq.true"
     status, body = _sb_request("GET", f"{SBX_TABLE}?{qs}")
@@ -323,9 +385,10 @@ def cross_reference_sbx_owners(api_key):
                          for r in json.loads(body) if r.get("owner_agency")})
     print(f"  SBX distinct electrical owners: {len(sbx_owners)}")
 
-    # 2) Pull all active prequals.
+    # 2) Pull all active prequals — include validated_owner_strings so we
+    #    can skip ones that already have a validation result.
     qs = ("status=in.(approved,renewed)&"
-          "select=id,agency_name,agency_aliases")
+          "select=id,agency_name,agency_aliases,validated_owner_strings")
     status, body = _sb_request("GET", f"{SUPABASE_TABLE}?{qs}")
     if status != 200:
         print(f"  [warn] could not load active prequals: HTTP {status}")
@@ -334,11 +397,18 @@ def cross_reference_sbx_owners(api_key):
     print(f"  Active prequals to cross-reference: {len(prequals)}")
 
     # 3) For each prequal, narrow candidates to plausible substring overlaps,
-    #    then have Claude make the final call.
+    #    then have Claude make the final call. Skip if already validated
+    #    unless force=True.
     updates = 0
+    skipped = 0
     for pq in prequals:
         canon = (pq.get("agency_name") or "").strip()
         if not canon:
+            continue
+        if not force and pq.get("validated_owner_strings") is not None:
+            # Already validated — list can be empty (legitimately no SBX match)
+            # or populated. Either way, don't re-pay for Claude.
+            skipped += 1
             continue
         candidates = candidate_owners_for(canon, pq.get("agency_aliases") or [], sbx_owners)
         if not candidates:
@@ -349,7 +419,7 @@ def cross_reference_sbx_owners(api_key):
         if validated:
             updates += 1
             print(f"  [✓] {canon[:40]:40}  matched {len(validated)} SBX owner(s): {[v[:40] for v in validated[:3]]}")
-    print(f"  Updated validated_owner_strings on {updates} prequal row(s).")
+    print(f"  Updated validated_owner_strings on {updates} prequal row(s); skipped {skipped} already-validated.")
 
 
 def candidate_owners_for(canon_agency, aliases, sbx_owners):

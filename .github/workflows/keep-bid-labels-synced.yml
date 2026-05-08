@@ -1,0 +1,28 @@
+name: Keep Gmail EST# Labels Synced
+
+on:
+  schedule:
+    - cron: "7 * * * *"  # Every hour at :07
+  workflow_dispatch: {}
+
+concurrency:
+  group: keep-bid-labels-synced
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install -r requirements.txt google-api-python-client google-auth-oauthlib
+
+      - run: python keep-bid-labels-synced.py
+        env:
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}

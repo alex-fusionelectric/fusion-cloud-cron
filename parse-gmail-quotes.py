@@ -848,21 +848,12 @@ LLM_SYSTEM_PROMPT = (
     "classifications cause real money to be lost — be conservative, follow "
     "every rule below, and never guess to fill a slot.\n"
     "\n"
-    "OUTPUT — strict JSON only. No prose before or after. Schema:\n"
-    '{\n'
-    '  \"scope_summary\": \"1–3 sentences on what is being bid and where '
-    'coverage stands\",\n'
-    '  \"vendors\": [\n'
-    '    {\n'
-    '      \"thread_id\": \"<unchanged from input>\",\n'
-    '      \"is_vendor_quote\": true | false,\n'
-    '      \"scopes\": [\"<canonical scope>\", ...],          // 0+ items, '
-    'see SCOPE TAXONOMY below. Empty array only if is_vendor_quote=false.\n'
-    '      \"response_status\": \"<one of the canonical statuses>\",\n'
-    '      \"notes\": \"<=140 chars summarizing what happened in this thread\"\n'
-    '    }\n'
-    '  ]\n'
-    '}\n'
+    "OUTPUT — call the `report_quote_analysis` tool exactly once. Its input "
+    "schema enforces the shape: a top-level `scope_summary` string plus a "
+    "`vendors` array, with one entry per input thread carrying "
+    "`thread_id` (unchanged from input), `is_vendor_quote` (bool), `scopes` "
+    "(array — empty only if is_vendor_quote=false), `response_status`, and "
+    "a short `notes` string.\n"
     "\n"
     "════════════════════════════════════════════════════\n"
     " STEP 1 — IS THIS A REAL VENDOR-QUOTE THREAD?\n"
@@ -1339,6 +1330,65 @@ def thread_summary_for_llm(thread):
     }
 
 
+CANONICAL_SCOPES_LIST = [
+    "fire alarm", "low voltage", "lighting", "distribution",
+    "trenching", "audio visual", "security", "nurse call",
+    "integration", "general",
+]
+
+# Tool schema — replaces the freeform JSON the prompt used to ask for. Anthropic's
+# tool-use machinery enforces this shape server-side, so we no longer need the
+# regex-strip-and-parse dance, no longer get malformed-JSON failures, and the
+# token cost on output drops slightly because no JSON whitespace is wasted.
+QUOTE_ANALYSIS_TOOL = {
+    "name": "report_quote_analysis",
+    "description": (
+        "Emit the structured per-thread classification for a project's "
+        "vendor-quote email threads."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "scope_summary": {
+                "type": "string",
+                "description": "1-3 sentences on what is being bid and where coverage stands.",
+            },
+            "vendors": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "thread_id": {
+                            "type": "string",
+                            "description": "Unchanged from the input thread_id.",
+                        },
+                        "is_vendor_quote": {
+                            "type": "boolean",
+                            "description": "False for addenda/RFI/admin posts; true only for genuine vendor quote threads.",
+                        },
+                        "scopes": {
+                            "type": "array",
+                            "description": "Canonical scope tags. Empty only when is_vendor_quote is false.",
+                            "items": {"type": "string", "enum": CANONICAL_SCOPES_LIST},
+                        },
+                        "response_status": {
+                            "type": "string",
+                            "description": "One of the canonical statuses (Pending, Acknowledged, Received, Declined, No Response, Unclear).",
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": "<=140 chars summarizing what happened in this thread.",
+                        },
+                    },
+                    "required": ["thread_id", "is_vendor_quote", "scopes", "response_status"],
+                },
+            },
+        },
+        "required": ["scope_summary", "vendors"],
+    },
+}
+
+
 def enrich_with_claude(client, project_label, project_number, threads):
     """One Claude call per project. Returns dict keyed by thread_id with
     enrichment fields, plus a project-level scope_summary."""
@@ -1360,31 +1410,37 @@ def enrich_with_claude(client, project_label, project_number, threads):
             "text": LLM_SYSTEM_PROMPT,
             "cache_control": {"type": "ephemeral"},
         }],
+        tools=[QUOTE_ANALYSIS_TOOL],
+        tool_choice={"type": "tool", "name": "report_quote_analysis"},
         messages=[{"role": "user", "content": user_msg}],
     )
 
-    text = ""
+    # With tool_choice forcing report_quote_analysis, the response will
+    # contain exactly one tool_use block whose `input` is already the
+    # validated dict. No JSON parsing, no fence-stripping needed.
+    parsed = None
     for block in (resp.content or []):
-        if getattr(block, "type", "") == "text":
-            text += block.text
-
-    # Parse JSON. The model occasionally wraps in ```json blocks — strip those.
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
-    try:
-        parsed = json.loads(cleaned)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  [warn] Claude returned non-JSON for {project_label}: {exc}", file=sys.stderr)
-        return {"scope_summary": "", "by_thread": {}, "error": str(exc), "raw": cleaned[:200]}
+        if getattr(block, "type", "") == "tool_use" and getattr(block, "name", "") == "report_quote_analysis":
+            parsed = block.input
+            break
+    if parsed is None:
+        # Defensive: if the tool somehow wasn't called, fall back to text
+        # parsing so we don't lose the run. Should never fire under normal
+        # tool_choice behavior, but guards against API regressions.
+        text = "".join(b.text for b in (resp.content or []) if getattr(b, "type", "") == "text").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+        try:
+            parsed = json.loads(text)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [warn] Claude returned no tool_use and non-JSON for {project_label}: {exc}", file=sys.stderr)
+            return {"scope_summary": "", "by_thread": {}, "error": str(exc), "raw": text[:200]}
 
     by_thread = {}
-    # Canonical scope set the prompt is allowed to emit.
-    CANONICAL_SCOPES = {
-        "fire alarm", "low voltage", "lighting", "distribution",
-        "trenching", "audio visual", "security", "nurse call",
-        "integration", "general",
-    }
+    # Defensive client-side validation. The tool schema's enum already
+    # restricts Claude's output to this set, but we re-check in case a
+    # cached/legacy response made it here through the fallback path.
+    CANONICAL_SCOPES = set(CANONICAL_SCOPES_LIST)
 
     def _canon_scope_list(raw):
         """Normalize Claude's output into a deduped list of canonical scopes.
@@ -1617,6 +1673,17 @@ def main():
                             final_scopes.append(cs)
                 else:
                     final_scopes = list(claude_scopes)
+                # Last-resort fallback: when nothing else fired (no subject
+                # suffix, no Claude output — typically because the cache
+                # holds an empty record from when scope detection was
+                # buggy), run bucket_scope() against the subject. This
+                # catches phrases like "Security Quote Request - 25-396"
+                # without needing a fresh Claude call. Keeps the icon
+                # populated instead of showing "—" forever for cached rows.
+                if not final_scopes:
+                    bs = bucket_scope(v.get("request_subject") or "")
+                    if bs and bs != "general":
+                        final_scopes = [bs]
                 if len(final_scopes) > 1 and "general" in final_scopes:
                     final_scopes = [s for s in final_scopes if s != "general"]
                 v["scopes"] = final_scopes

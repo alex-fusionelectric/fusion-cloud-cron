@@ -93,35 +93,30 @@ def _job_to_row(job, generated_at):
 def write_to_supabase(payload, *, batch_size=200):
     key = _resolve_service_key()
     api = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
-    headers = {
-        "apikey": key,
+    headers_upsert = {
+        "apikey":        key,
         "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal",
+        "Content-Type":  "application/json",
+        "Prefer":        "resolution=merge-duplicates,return=minimal",
+    }
+    headers_delete = {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal",
     }
     jobs = payload.get("jobs", [])
     aggregates = payload.get("aggregates", {})
     generated_at = payload.get("generatedAt")
     rows = [_job_to_row(j, generated_at) for j in jobs]
-    # Skip rows without an id -- can't be primary-keyed.
     rows = [r for r in rows if r.get("id")]
 
-    print(f"Clearing existing rows in public.{SUPABASE_TABLE}...")
-    req = urllib.request.Request(api + "?id=not.is.null", method="DELETE", headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status not in (200, 204):
-                raise SystemExit(f"DELETE failed: HTTP {resp.status}")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"DELETE failed: HTTP {e.code} {body}")
-
-    print(f"Inserting {len(rows)} job row(s) in batches of {batch_size}...")
+    print(f"Upserting {len(rows)} job row(s) in batches of {batch_size}...")
     sent = 0
     for i in range(0, len(rows), batch_size):
         chunk = rows[i:i + batch_size]
         body = json.dumps(chunk).encode("utf-8")
-        req = urllib.request.Request(api, method="POST", headers=headers, data=body)
+        req = urllib.request.Request(api, method="POST", headers=headers_upsert, data=body)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 if resp.status not in (200, 201, 204):
@@ -133,7 +128,7 @@ def write_to_supabase(payload, *, batch_size=200):
         print(f"  ... {sent}/{len(rows)}")
     print(f"Wrote {sent} job row(s) to public.{SUPABASE_TABLE}.")
 
-    # Aggregates meta row -- one row per dataset summarizing totals.
+    # Aggregates meta row — upserted before stale-purge so it's always current.
     meta_row = {
         "id":           "__meta__",
         "job_id":       None,
@@ -143,7 +138,7 @@ def write_to_supabase(payload, *, batch_size=200):
         "updated_at":   generated_at,
     }
     body = json.dumps([meta_row]).encode("utf-8")
-    req = urllib.request.Request(api, method="POST", headers=headers, data=body)
+    req = urllib.request.Request(api, method="POST", headers=headers_upsert, data=body)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             if resp.status not in (200, 201, 204):
@@ -152,6 +147,18 @@ def write_to_supabase(payload, *, batch_size=200):
         err = e.read().decode("utf-8", errors="replace")
         raise SystemExit(f"POST meta failed: HTTP {e.code} {err}")
     print("Wrote aggregates meta row (id='__meta__').")
+
+    # Purge rows from previous runs not present in this parse.
+    stale_url = api + "?updated_at=neq." + urllib.parse.quote(generated_at, safe="")
+    req = urllib.request.Request(stale_url, method="DELETE", headers=headers_delete)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status not in (200, 204):
+                raise SystemExit(f"DELETE stale failed: HTTP {resp.status}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"DELETE stale failed: HTTP {e.code} {body}")
+    print(f"Purged stale rows (updated_at != {generated_at}).")
 
 
 def main():

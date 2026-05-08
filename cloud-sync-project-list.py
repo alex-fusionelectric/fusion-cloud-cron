@@ -112,7 +112,13 @@ def _project_to_row(project, generated_at):
 def write_to_supabase(payload, *, batch_size=200):
     key = _resolve_service_key()
     api = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
-    headers = {
+    headers_upsert = {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+        "Prefer":        "resolution=merge-duplicates,return=minimal",
+    }
+    headers_delete = {
         "apikey":        key,
         "Authorization": f"Bearer {key}",
         "Content-Type":  "application/json",
@@ -124,22 +130,12 @@ def write_to_supabase(payload, *, batch_size=200):
     generated_at = payload.get("generatedAt")
     rows = [_project_to_row(b, generated_at) for b in bids]
 
-    print(f"Clearing existing rows in public.{SUPABASE_TABLE}...")
-    req = urllib.request.Request(api + "?id=not.is.null", method="DELETE", headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status not in (200, 204):
-                raise SystemExit(f"DELETE failed: HTTP {resp.status}")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"DELETE failed: HTTP {e.code} {body}")
-
-    print(f"Inserting {len(rows)} project row(s) in batches of {batch_size}...")
+    print(f"Upserting {len(rows)} project row(s) in batches of {batch_size}...")
     sent = 0
     for i in range(0, len(rows), batch_size):
         chunk = rows[i:i + batch_size]
         body = json.dumps(chunk).encode("utf-8")
-        req = urllib.request.Request(api, method="POST", headers=headers, data=body)
+        req = urllib.request.Request(api, method="POST", headers=headers_upsert, data=body)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 if resp.status not in (200, 201, 204):
@@ -151,9 +147,7 @@ def write_to_supabase(payload, *, batch_size=200):
         print(f"  ... {sent}/{len(rows)}")
     print(f"Wrote {sent} project row(s) to public.{SUPABASE_TABLE}.")
 
-    # Meta row holds the full changeOrders dict + counts so the PM Panel
-    # can fetch all CO data in a single round trip and keep its existing
-    # applyStaticChangeOrders() code path unchanged.
+    # Meta row — upserted before stale-purge so it's always current.
     meta_row = {
         "id":           "__meta__",
         "project_name": "(change orders)",
@@ -167,7 +161,7 @@ def write_to_supabase(payload, *, batch_size=200):
         "updated_at":   generated_at,
     }
     body = json.dumps([meta_row]).encode("utf-8")
-    req = urllib.request.Request(api, method="POST", headers=headers, data=body)
+    req = urllib.request.Request(api, method="POST", headers=headers_upsert, data=body)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             if resp.status not in (200, 201, 204):
@@ -177,6 +171,18 @@ def write_to_supabase(payload, *, batch_size=200):
         raise SystemExit(f"POST meta failed: HTTP {e.code} {err}")
     co_count = payload.get("coCount", 0)
     print(f"Wrote aggregates meta row (id='__meta__', {co_count} change orders).")
+
+    # Purge rows from previous runs not present in this parse.
+    stale_url = api + "?updated_at=neq." + urllib.parse.quote(generated_at, safe="")
+    req = urllib.request.Request(stale_url, method="DELETE", headers=headers_delete)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status not in (200, 204):
+                raise SystemExit(f"DELETE stale failed: HTTP {resp.status}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"DELETE stale failed: HTTP {e.code} {body}")
+    print(f"Purged stale rows (updated_at != {generated_at}).")
 
 
 def main():
