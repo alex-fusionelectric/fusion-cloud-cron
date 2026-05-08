@@ -1,0 +1,37 @@
+name: Scrape project addresses from BBs
+
+# For every active project missing an address in project_locations_cloud,
+# walks the project's Dropbox folder, finds the BID BREAKDOWN xlsm, and
+# scrapes the address out of it heuristically. Writes into
+# project_locations_cloud where the geocoder cron picks it up next.
+#
+# Runs nightly + on demand (workflow_dispatch). BBs only update at bid
+# setup or when the estimator edits, so daily is plenty.
+
+on:
+  schedule:
+    - cron: "30 9 * * *"   # 09:30 UTC = 02:30 Pacific (overnight)
+  workflow_dispatch: {}
+
+concurrency:
+  group: scrape-project-addresses
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install dropbox openpyxl
+      - name: Scrape addresses
+        env:
+          SUPABASE_SERVICE_KEY:    ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DROPBOX_REFRESH_TOKEN:   ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          DROPBOX_APP_KEY:         ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET:      ${{ secrets.DROPBOX_APP_SECRET }}
+        run: python scrape-project-addresses-from-bb.py
