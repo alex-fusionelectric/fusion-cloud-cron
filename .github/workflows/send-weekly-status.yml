@@ -1,0 +1,31 @@
+name: Send weekly status
+
+# Sunday 6 PM Pacific = Monday 02:00 UTC. Sends Alex a summary email
+# of the week's hours, project totals, and action items.
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"     # Mon 02:00 UTC = Sun 6 PM PST / 7 PM PDT
+  workflow_dispatch: {}
+
+concurrency:
+  group: send-weekly-status
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt google-api-python-client google-auth-oauthlib
+      - name: Send weekly status
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GMAIL_TOKEN_JSON:     ${{ secrets.GMAIL_TOKEN_JSON }}
+          GMAIL_FROM:           ${{ secrets.GMAIL_FROM }}
+        run: python send-weekly-status.py
