@@ -89,10 +89,6 @@ def gather_week():
         "projects_cloud?select=full_number,project_name,division,payload"
     )
     addresses = fetch_json("project_locations_cloud?select=full_number,lat,lng")
-    bids_pending_setup = fetch_json(
-        "bids_cloud?select=est_number,project_name,status&status=in.(BIDDING,BID%20OR%20BAIL)"
-    )
-    prebids = fetch_json("prebid_bids_cloud?select=est_number,status")
     addenda = fetch_json("bid_addenda_cloud?select=est_number,addendum_number,found_in_folder,auto_downloaded_at")
     # Budgets feed the per-division health roll-up. We pull only the
     # columns we aggregate on to keep the payload small for Claude.
@@ -106,8 +102,6 @@ def gather_week():
         "entries": entries,
         "active_projects": active_projects,
         "addresses": addresses,
-        "bids_pending_setup": bids_pending_setup,
-        "prebids": prebids,
         "addenda": addenda,
         "budgets": budgets,
     }
@@ -282,10 +276,6 @@ def render_email(data: dict) -> tuple[str, str]:
         if jls in ("CURRENT", "READY TO CLOSE", "NO LABOR YET") and p["full_number"] not in addr_set:
             active_no_addr.append(p)
 
-    # Bids in BIDDING/BID OR BAIL with no prebid yet (= not setup-bid'd yet)
-    prebid_ests = {p["est_number"] for p in data["prebids"]}
-    bids_no_setup = [b for b in data["bids_pending_setup"] if b["est_number"] not in prebid_ests]
-
     # Addenda missing from folder
     addenda_missing = [a for a in data["addenda"] if not a.get("found_in_folder")]
 
@@ -325,7 +315,6 @@ def render_email(data: dict) -> tuple[str, str]:
                 plain.append(f"    {line}")
     plain.append(f"\n— GAPS —")
     plain.append(f"  Active jobs without an address: {len(active_no_addr)}")
-    plain.append(f"  Bids awaiting Setup Bid:        {len(bids_no_setup)}")
     plain.append(f"  Addenda missing from folder:    {len(addenda_missing)}")
     plain_body = "\n".join(plain)
 
@@ -371,7 +360,7 @@ def render_email(data: dict) -> tuple[str, str]:
 
     # Gaps — three pills
     def gap_pill(count, label, color):
-        return f"""<td valign="top" style="padding:6px;text-align:center;width:33.33%">
+        return f"""<td valign="top" style="padding:6px;text-align:center;width:50%">
 <div style="background:{color['bg']};border:1px solid {color['border']};border-radius:10px;padding:14px 8px">
 <div style="font-size:24px;font-weight:800;color:{color['text']};line-height:1">{count}</div>
 <div style="font-size:11px;color:#475569;margin-top:6px;line-height:1.3">{label}</div>
@@ -385,10 +374,6 @@ def render_email(data: dict) -> tuple[str, str]:
     no_addr_li = "".join(
         f"<li style='padding:4px 0;color:#475569;font-size:13px'>{esc(p['full_number'])} <span style='color:#94a3b8'>·</span> {esc(p.get('project_name') or '')}</li>"
         for p in active_no_addr[:15]
-    )
-    no_setup_li = "".join(
-        f"<li style='padding:4px 0;color:#475569;font-size:13px'>EST# {esc(b['est_number'])} <span style='color:#94a3b8'>·</span> {esc(b.get('project_name') or '')}</li>"
-        for b in bids_no_setup[:15]
     )
 
     # Headline framing
@@ -511,14 +496,12 @@ def render_email(data: dict) -> tuple[str, str]:
 <div style="font-size:11px;font-weight:700;letter-spacing:1.2px;color:#64748b;text-transform:uppercase;margin:8px 8px 12px">Needs attention</div>
 <table cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
 {gap_pill(len(active_no_addr), "Active jobs without an address", color_amber)}
-{gap_pill(len(bids_no_setup), "Bids awaiting Setup Bid", color_blue)}
 {gap_pill(len(addenda_missing), "Addenda missing from folder", color_red)}
 </tr></table>
 </td></tr>
 
 <!-- Detail drilldowns (collapsed) -->
 {f'''<tr><td style="padding:0 32px 16px"><details style="margin-top:8px"><summary style="cursor:pointer;color:#64748b;font-size:12px;font-weight:600;letter-spacing:.4px">Active jobs without address ({len(active_no_addr)})</summary><ul style="margin:8px 0 0;padding-left:18px;list-style:disc">{no_addr_li}</ul></details></td></tr>''' if no_addr_li else ''}
-{f'''<tr><td style="padding:0 32px 16px"><details><summary style="cursor:pointer;color:#64748b;font-size:12px;font-weight:600;letter-spacing:.4px">Bids awaiting Setup Bid ({len(bids_no_setup)})</summary><ul style="margin:8px 0 0;padding-left:18px;list-style:disc">{no_setup_li}</ul></details></td></tr>''' if no_setup_li else ''}
 
 <!-- Footer -->
 <tr><td style="padding:20px 32px 24px;border-top:1px solid #f1f5f9;text-align:center">
