@@ -28,4 +28,5 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           GMAIL_TOKEN_JSON:     ${{ secrets.GMAIL_TOKEN_JSON }}
           GMAIL_FROM:           ${{ secrets.GMAIL_FROM }}
+          CLAUDE_API_KEY:       ${{ secrets.CLAUDE_API_KEY }}
         run: python send-weekly-status.py
