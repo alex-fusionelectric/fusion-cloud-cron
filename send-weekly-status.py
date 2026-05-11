@@ -349,13 +349,27 @@ def render_email(data: dict) -> tuple[str, str]:
 </table>
 </td></tr>"""
 
+    # Project name lookup — projects_cloud first, budgets_cloud as fallback
+    # for jobs that took time but aren't in the active list.
+    proj_names: dict[str, str] = {}
+    for p in data["active_projects"]:
+        if p.get("full_number") and p.get("project_name"):
+            proj_names[p["full_number"]] = p["project_name"]
+    for b in data["budgets"]:
+        fn = b.get("full_number")
+        if fn and b.get("project_name") and fn not in proj_names:
+            proj_names[fn] = b["project_name"]
+
     # Project rows — top 8
     sorted_proj = sorted(by_proj.items(), key=lambda kv: -kv[1]["hrs_ms"])[:8]
     proj_html = ""
     for proj, r in sorted_proj:
+        name = proj_names.get(proj, "")
+        name_line = (f'<div style="font-size:11px;color:#94a3b8;margin-top:2px;letter-spacing:.2px">'
+                     f'{esc(name)}</div>') if name else ""
         proj_html += f"""<tr>
-<td style="padding:9px 0;border-top:1px solid #f1f5f9;font-size:14px;color:#0f172a">{esc(proj)}</td>
-<td style="padding:9px 0;border-top:1px solid #f1f5f9;font-size:14px;color:#0f172a;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">{hours(r['hrs_ms'])}</td>
+<td style="padding:9px 0;border-top:1px solid #f1f5f9;font-size:14px;color:#0f172a;vertical-align:top">{esc(proj)}{name_line}</td>
+<td style="padding:9px 0;border-top:1px solid #f1f5f9;font-size:14px;color:#0f172a;text-align:right;font-weight:700;font-variant-numeric:tabular-nums;vertical-align:top">{hours(r['hrs_ms'])}</td>
 </tr>"""
 
     # Gaps — three pills
