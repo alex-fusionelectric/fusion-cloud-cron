@@ -195,7 +195,6 @@ new_auth = '''    // --- Google OAuth + per-user panel access ---
       "alex@fusionelectric-inc.com":          ["bid", "pm", "field", "ops"],
       "jake@fusionelectric-inc.com":          ["bid", "pm", "field", "ops"],
       "gabriel.toler@fusionelectric-inc.com": ["bid", "pm", "field", "ops"],
-      "johnpaulbuckley1170@gmail.com":        ["bid", "pm", "field", "ops"],
     };
     function roleDefault(role) {
       if (role === "admin")   return ["bid", "pm", "field", "ops"];
