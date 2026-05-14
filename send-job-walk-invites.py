@@ -113,6 +113,29 @@ def fetch_already_sent_ids():
     return {r["id"] for r in json.loads(body)}
 
 
+def fetch_prebid_locations():
+    """Map est_number -> job_walk_location set during Bay PowerBid bid setup.
+    This is the most-authoritative source for the meeting address because
+    Alex enters it explicitly when setting up the bid (vs Claude trying to
+    parse it out of spec PDFs). Returns {} if the table/column is missing
+    so the rest of the pipeline keeps working."""
+    status, body = _sb_request(
+        "GET",
+        "prebid_bids_cloud?select=est_number,job_walk_location"
+        "&job_walk_location=not.is.null",
+    )
+    if status != 200:
+        print(f"[warn] prebid_bids_cloud locations GET failed: HTTP {status}")
+        return {}
+    out = {}
+    for r in json.loads(body):
+        est = (r.get("est_number") or "").strip()
+        loc = (r.get("job_walk_location") or "").strip()
+        if est and loc:
+            out[est] = loc
+    return out
+
+
 def record_sent(row):
     status, body = _sb_request(
         "POST", SENT_TABLE, body=[row],
@@ -414,6 +437,7 @@ def main():
 
     bids = fetch_active_bids()
     already_sent = fetch_already_sent_ids()
+    prebid_locations = fetch_prebid_locations()
     print(f"Active bids: {len(bids)}; already-sent invite ids: {len(already_sent)}")
 
     svc = gmail_service()
@@ -459,18 +483,24 @@ def main():
         gc = b.get("client_gc") or ""
         docs = b.get("documents_url") or ""
         # Location precedence (highest to lowest):
-        #   1. SBX listing's pre_bid_meeting_location (parsed from the
+        #   1. prebid_bids_cloud.job_walk_location -- set by Alex during
+        #      Bay PowerBid bid setup. Most authoritative because it's
+        #      human-entered, not parsed.
+        #   2. SBX listing's pre_bid_meeting_location (parsed from the
         #      "Pre Bid Conference: ... (LOCATION HERE) ..." block on the
-        #      project page) -- this is the most reliable when present
-        #   2. Claude extraction from cached spec docs
-        #   3. payload.location from BID LIST
-        #   4. "TBD" -- but never fall back to client_gc, because if the
+        #      project page) -- reliable when present
+        #   3. Claude extraction from cached spec docs
+        #   4. payload.location from BID LIST
+        #   5. "TBD" -- but never fall back to client_gc, because if the
         #      client got normalized to "MISC CUSTOMER" (not in KEYS list),
         #      using it as the meeting address makes no sense.
         sbx = b.get("sbx_listing") or {}
         sbx_pre_bid_loc = (sbx.get("pre_bid_meeting_location") or "").strip()
         bid_list_loc = (payload.get("location") or "").strip()
-        if sbx_pre_bid_loc:
+        prebid_loc = prebid_locations.get(est, "")
+        if prebid_loc:
+            location = prebid_loc
+        elif sbx_pre_bid_loc:
             location = sbx_pre_bid_loc
         else:
             spec_text = fetch_cached_spec_text_for_est(est)
