@@ -31,6 +31,11 @@ try:
     from googleapiclient.discovery import build  # type: ignore
     from google.oauth2.credentials import Credentials  # type: ignore
     from google.auth.transport.requests import Request  # type: ignore
+
+try:
+    from _claude_log import log_claude_call
+except ImportError:
+    def log_claude_call(**kwargs): pass  # no-op fallback
 except ImportError as exc:
     print(f"[error] google api libs missing: {exc}", file=sys.stderr)
     sys.exit(2)
@@ -211,6 +216,7 @@ def claude_division_summary(div_health: dict) -> str | None:
     try:
         with urllib.request.urlopen(req, timeout=45) as r:
             data = json.loads(r.read())
+        log_claude_call(feature='weekly-status-summary', model=data.get('model') or 'unknown', usage=data.get('usage'))
     except Exception as e:
         print(f"  [claude-warn] {e}")
         return None

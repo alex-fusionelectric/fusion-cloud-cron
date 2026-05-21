@@ -33,6 +33,11 @@ try:
     from googleapiclient.discovery import build  # type: ignore
     from google.oauth2.credentials import Credentials  # type: ignore
     from google.auth.transport.requests import Request  # type: ignore
+
+try:
+    from _claude_log import log_claude_call
+except ImportError:
+    def log_claude_call(**kwargs): pass  # no-op fallback
 except ImportError as exc:
     print(f"[error] google api libs missing: {exc}", file=sys.stderr)
     sys.exit(2)
@@ -213,6 +218,7 @@ Return ONLY a JSON object (no prose, no markdown):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read())
+        log_claude_call(feature='job-walk-invite', model=data.get('model') or 'unknown', usage=data.get('usage'))
     except Exception as e:  # noqa: BLE001
         print(f"  [llm-warn] {e}")
         return fallback_location

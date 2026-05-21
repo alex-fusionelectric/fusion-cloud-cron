@@ -30,6 +30,11 @@ from email.utils import parseaddr
 from pathlib import Path
 
 try:
+    from _claude_log import log_claude_call
+except ImportError:
+    def log_claude_call(**kwargs): pass  # no-op fallback
+
+try:
     from googleapiclient.discovery import build  # type: ignore
     from google.oauth2.credentials import Credentials  # type: ignore
     from google.auth.transport.requests import Request  # type: ignore
@@ -275,6 +280,12 @@ Body (truncated to 6000 chars):
     except Exception as e:  # noqa: BLE001
         print(f"  [llm-warn] {e}")
         return None
+    log_claude_call(
+        feature="prequal-parse",
+        model=data.get("model") or "claude-haiku-4-5-20251001",
+        usage=data.get("usage"),
+        metadata={"subject_prefix": (subject or "")[:80]},
+    )
     text = ""
     for c in data.get("content", []):
         if c.get("type") == "text":
@@ -598,6 +609,12 @@ def ai_filter_same_entity(canon_agency, candidate_owners, *, api_key):
     except Exception as e:  # noqa: BLE001
         print(f"  [llm-warn] {canon_agency[:30]}: {e}")
         return []
+    log_claude_call(
+        feature="prequal-sbx-crossref",
+        model=data.get("model") or CLAUDE_MODEL,
+        usage=data.get("usage"),
+        metadata={"agency": canon_agency[:80]},
+    )
     text = ""
     for c in data.get("content", []):
         if c.get("type") == "text":

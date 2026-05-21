@@ -43,6 +43,11 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import scan_prequal_compat as sp  # noqa: E402
 
+try:
+    from _claude_log import log_claude_call
+except ImportError:
+    def log_claude_call(**kwargs): pass  # no-op fallback
+
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 PREQUAL_TABLE = "prequal_cloud"
 KV_TABLE = "dropbox_kv_cloud"
@@ -307,6 +312,7 @@ Rules:
     try:
         with urllib.request.urlopen(req, timeout=45) as resp:
             data = json.loads(resp.read())
+        log_claude_call(feature='prequal-classify', model=data.get('model') or 'unknown', usage=data.get('usage'))
     except Exception as e:  # noqa: BLE001
         print(f"  [llm-warn] {e}")
         return None, None

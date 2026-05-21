@@ -44,6 +44,11 @@ try:
     from googleapiclient.discovery import build  # type: ignore
     from google.oauth2.credentials import Credentials  # type: ignore
     from google.auth.transport.requests import Request  # type: ignore
+
+try:
+    from _claude_log import log_claude_call
+except ImportError:
+    def log_claude_call(**kwargs): pass  # no-op fallback
 except ImportError as exc:
     print(f"[error] google api libs missing: {exc}", file=sys.stderr)
     sys.exit(2)
@@ -285,6 +290,7 @@ Body (first 4000 chars):
     try:
         with urllib.request.urlopen(req, timeout=45) as resp:
             data = json.loads(resp.read())
+        log_claude_call(feature='bid-invitations-classify', model=data.get('model') or 'unknown', usage=data.get('usage'))
     except urllib.error.HTTPError as e:
         body_txt = ""
         try: body_txt = e.read().decode("utf-8", errors="replace")[:200]
