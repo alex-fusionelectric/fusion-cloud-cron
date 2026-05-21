@@ -127,6 +127,20 @@ _SUBJECT_NOISE = re.compile(
 _SUBJECT_DASH = re.compile(r"\s*[-–:|]\s*")
 
 
+# Result words that mean "this subject isn't an agency name". When the
+# fallback regex reduces a subject to one of these, return empty and let
+# the caller mark the row "Unknown" instead of inventing a bad agency.
+# Seen in the 2026-05-21 backfill: "Re: PreQual Info Request" was producing
+# fake agency "Info Request" because nothing else was left after noise
+# stripping.
+_AGENCY_FALLBACK_DENY = re.compile(
+    r"^(?:info|insurance|insurance\s+info|info\s+request|insurance\s+info\s+request"
+    r"|documents?|paperwork|forms?|application\s+forms?|questions?|follow[- ]up"
+    r"|update|reminder|inquiry|clarification|info\s+needed|response)$",
+    re.IGNORECASE,
+)
+
+
 def agency_from_subject(subject):
     """Best-effort regex extract for when Claude returns null/empty agency.
     The subject line almost always carries the agency in plain text after
@@ -148,6 +162,9 @@ def agency_from_subject(subject):
     out = re.sub(r"\s+", " ", out).strip(" \"'-–:|.")
     # Reject if reduced to noise (under 4 chars or pure digits).
     if len(out) < 4 or out.isdigit():
+        return ""
+    # Reject known noise phrases that look like agencies but aren't.
+    if _AGENCY_FALLBACK_DENY.match(out):
         return ""
     return out[:200]
 
