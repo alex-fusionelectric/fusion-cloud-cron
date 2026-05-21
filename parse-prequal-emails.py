@@ -115,6 +115,31 @@ def extract_body(payload):
     return plain if plain else _strip_html(html)
 
 
+# --- Agency-name canonicalization -------------------------------------------
+
+# Aliases → canonical name. Mirrors normalize-agency-names.py so the cleanup
+# script and the live cron stay aligned. Add a new entry here when a Claude
+# extraction produces a shorter or abbreviated variant of an agency we
+# already have under a longer canonical name.
+_AGENCY_CANONICAL = {
+    "berryessa":                              "Berryessa Union School District",
+    "brentwood usd":                          "Brentwood Unified School District",
+    "clpccd":                                 "Chabot-Las Positas Community College District",
+    "menlo park":                             "Menlo Park City School District",
+    "san mateo foster city school district":  "San Mateo-Foster City School District",
+}
+
+
+def canonicalize_agency_name(name):
+    """Return the canonical form of an agency name, or `name` unchanged if
+    we don't have a mapping for it. Case-insensitive lookup; the canonical
+    form is returned exactly as defined in _AGENCY_CANONICAL."""
+    if not name:
+        return name
+    key = name.strip().lower()
+    return _AGENCY_CANONICAL.get(key, name.strip())
+
+
 # --- Agency-name fallback ---------------------------------------------------
 
 # Words to strip from subject lines when guessing an agency name.
@@ -406,6 +431,10 @@ def main():
         if not agency_clean:
             agency_clean = "Unknown"
             print(f"  [agency-unknown] subject={subject[:80]!r} id={m['id']}")
+        # Final canonicalization so common abbreviations / shortened
+        # variants always land under one name (USD vs Unified School
+        # District, CLPCCD vs the full name, etc.).
+        agency_clean = canonicalize_agency_name(agency_clean)
 
         rows.append({
             "id":               m["id"],
