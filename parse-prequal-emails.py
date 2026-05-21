@@ -52,13 +52,15 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 # Supabase. Each cron tick should only sweep recent mail. The dedup check
 # against prequal_approvals_cloud below means even messages inside this
 # window are only classified by Claude on the FIRST run that sees them.
-# If you ever need to re-run a historical sweep, set BACKFILL_DAYS or
-# temporarily widen `newer_than` here.
+# Set BACKFILL_DAYS (e.g. =365) to widen the sweep — combine with
+# PREQUAL_FORCE_RECLASSIFY=1 to re-classify everything in the wider window.
+_BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "0") or "0")
+_WINDOW_DAYS = _BACKFILL_DAYS if _BACKFILL_DAYS > 0 else 30
 GMAIL_QUERY = (
     'from:kim@fusionelectric-inc.com '
     '(subject:prequal OR subject:"Pre-Qualification" OR subject:"pre-qualification" '
     'OR "approved to bid" OR "Approval" OR "expir" OR "renewed" OR "rescind") '
-    'newer_than:30d'
+    f'newer_than:{_WINDOW_DAYS}d'
 )
 
 
@@ -113,6 +115,43 @@ def extract_body(payload):
     return plain if plain else _strip_html(html)
 
 
+# --- Agency-name fallback ---------------------------------------------------
+
+# Words to strip from subject lines when guessing an agency name.
+_SUBJECT_NOISE = re.compile(
+    r"\b(?:RE|FW|FWD|Re|Fw|Fwd|Pre[- ]?Qual(?:ification)?s?|Prequal(?:ification)?s?"
+    r"|Approval|Approved|Renewal|Renewed|Notification|Notice|Status|Update|Confirmation"
+    r"|Application|Submit(?:ted|tal)?|Pending|Review)\b",
+    re.IGNORECASE,
+)
+_SUBJECT_DASH = re.compile(r"\s*[-–:|]\s*")
+
+
+def agency_from_subject(subject):
+    """Best-effort regex extract for when Claude returns null/empty agency.
+    The subject line almost always carries the agency in plain text after
+    stripping prequal-related noise words and leading/trailing punctuation.
+    Returns "" if nothing useful is left."""
+    if not subject:
+        return ""
+    s = subject.strip()
+    # Drop bracketed labels like "[EXTERNAL]" that some forwards add.
+    s = re.sub(r"\[[^\]]+\]", " ", s)
+    # Strip noise words.
+    s = _SUBJECT_NOISE.sub(" ", s)
+    # Split on punctuation separators; keep the longest segment, which is
+    # usually the bare agency name once the prequal vocabulary is gone.
+    parts = [p.strip(" -–:|") for p in _SUBJECT_DASH.split(s) if p.strip(" -–:|")]
+    parts.sort(key=len, reverse=True)
+    out = parts[0] if parts else s
+    # Collapse whitespace, strip leftover punctuation/quotes.
+    out = re.sub(r"\s+", " ", out).strip(" \"'-–:|.")
+    # Reject if reduced to noise (under 4 chars or pure digits).
+    if len(out) < 4 or out.isdigit():
+        return ""
+    return out[:200]
+
+
 # --- Claude classification --------------------------------------------------
 
 def llm_extract(subject, body, *, api_key):
@@ -125,7 +164,7 @@ Return ONLY a JSON object (no prose, no markdown). Use null when unknown.
   "is_prequal_notice": true|false,
   "agency_name": "canonical agency name e.g. 'Sequoia Union High School District'" or null,
   "agency_aliases": ["other forms the same agency might use","..."],
-  "status": "approved" | "pending" | "expired" | "rescinded" | "renewed" | "denied" | null,
+  "status": "approved" | "renewed" | "submitted" | "under review" | "denied" | "rescinded" | "expired" | null,
   "approval_amount": 1465800.00 (numeric dollar limit if stated) or null,
   "application_number": "977391" or null,
   "approval_date": "YYYY-MM-DD" or null,
@@ -133,6 +172,23 @@ Return ONLY a JSON object (no prose, no markdown). Use null when unknown.
   "notes": "Kim's commentary in her forwarded message (skip the legal boilerplate)" or null,
   "signals": ["short phrases that drove your classification"]
 }}
+
+STATUS taxonomy — pick the most specific match:
+- "approved"     = agency just granted prequal (new approval)
+- "renewed"      = prior approval was renewed/extended before expiration
+- "submitted"    = Kim sent the application to the agency, awaiting response
+- "under review" = agency acknowledged receipt and is reviewing
+- "denied"       = agency declined the application
+- "rescinded"    = previously approved, now revoked
+- "expired"      = approval lapsed past its expiration date
+Default to null only when the email is genuinely a prequal notice but you cannot tell the status from any signal.
+
+AGENCY NAME — extract aggressively. If the body is sparse, the SUBJECT
+LINE almost always names the agency (e.g. "Prequalification - Sequoia
+Union HSD", "FW: City of Hayward Prequal Renewal"). Strip generic words
+like "Prequal", "Pre-Qualification", "Approval", "RE:", "FW:". Never
+return "Unknown" — return null and the caller will fall back to a
+regex over the subject.
 
 CRITICAL RULES for date fields:
 1. approval_date: ONLY return a date if the email explicitly states the
@@ -274,8 +330,15 @@ def main():
     # messages whose row already exists. Once a prequal email is in
     # Supabase its content doesn't change — re-asking Haiku is pure waste.
     # If Supabase is unreachable we fall back to an empty set (full classify).
-    existing_ids = load_existing_message_ids()
-    print(f"Skipping {len(existing_ids)} message(s) already classified in {SUPABASE_TABLE}.")
+    # PREQUAL_FORCE_RECLASSIFY=1 bypasses this dedup so a single backfill
+    # run can re-classify every recent row with an improved prompt.
+    force_reclassify = bool(int(os.environ.get("PREQUAL_FORCE_RECLASSIFY", "0") or "0"))
+    if force_reclassify:
+        existing_ids = set()
+        print("PREQUAL_FORCE_RECLASSIFY=1: re-classifying every message in window.")
+    else:
+        existing_ids = load_existing_message_ids()
+        print(f"Skipping {len(existing_ids)} message(s) already classified in {SUPABASE_TABLE}.")
 
     rows = []
     skipped_existing = 0
@@ -314,9 +377,22 @@ def main():
         if not approval_date and status_lower in ("approved", "renewed") and received_dt:
             approval_date = received_dt.strftime("%Y-%m-%d")
 
+        # Agency name resolution: Claude → regex on subject → "Unknown".
+        # The regex fallback handles cases where Claude returns null
+        # because the body is sparse but the subject names the agency.
+        # Without this, ~13% of rows landed as agency_name="Unknown".
+        agency_clean = (ext.get("agency_name") or "").strip()
+        if not agency_clean:
+            agency_clean = agency_from_subject(subject)
+            if agency_clean:
+                print(f"  [agency-fallback] '{subject[:60]}' -> '{agency_clean}'")
+        if not agency_clean:
+            agency_clean = "Unknown"
+            print(f"  [agency-unknown] subject={subject[:80]!r} id={m['id']}")
+
         rows.append({
             "id":               m["id"],
-            "agency_name":      (ext.get("agency_name") or "").strip()[:300] or "Unknown",
+            "agency_name":      agency_clean[:300],
             "agency_aliases":   ext.get("agency_aliases") or [],
             "status":           (ext.get("status") or "approved")[:30],
             "approval_amount":  ext.get("approval_amount"),
