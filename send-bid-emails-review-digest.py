@@ -167,8 +167,17 @@ def main():
     sender = (os.environ.get("GMAIL_FROM") or "").strip()
     if not sender:
         raise SystemExit("GMAIL_FROM env var required.")
-    recipient = (os.environ.get("ALERT_TO_EMAIL") or
-                 "alex@fusionelectric-inc.com").strip()
+
+    # Policy gate: this digest is OFF by default in email_policies_cloud
+    # (Alex didn't sanction it as one of the four standard email types).
+    # Re-enable from /admin/ Email Center if you ever want it back.
+    from _email_policies import get_recipients_for, record_send
+    recipients = get_recipients_for("bid_review_digest")
+    if not recipients:
+        print("  [policy] bid_review_digest disabled OR no recipients -- skipping.")
+        return
+    recipient = ",".join(recipients)
+    print(f"  [policy] recipients = {recipients}")
 
     rows = fetch_pending()
     if not rows:
@@ -179,6 +188,10 @@ def main():
     svc = gmail_service()
     send_digest(svc, sender, recipient, body, len(rows))
     stamp_sent([r["id"] for r in rows])
+    try:
+        record_send("bid_review_digest", recipients)
+    except Exception:
+        pass
     print(f"=== sent digest with {len(rows)} email(s) ===")
 
 

@@ -1,17 +1,20 @@
-name: Send bid-emails review digest
+name: Send bid-emails review digest (DISABLED)
 
-# Daily digest of bid-label emails that the addenda detector flagged as
-# 'review_needed' (didn't match any scope-change pattern, not from Fusion,
-# no attachments). Alex gets one email each morning listing what landed
-# overnight that needs a human eyeball.
+# DISABLED 2026-05-22 -- Alex didn't have this on the approved email list
+# (only bid_setup_complete / addenda_alert / daily_changes / weekly_digest
+# are sanctioned). The "review needed" pile is 265 deep so dumping it
+# every morning at 7 AM PT was noise.
 #
-# Runs at 06:30 PT every weekday (= 13:30 UTC PST / 14:30 UTC PDT;
-# we use 14:00 UTC year-round which is 06:00 PST / 07:00 PDT -- close
-# enough to "first thing in the morning").
+# Schedule removed -- can only fire via manual workflow_dispatch. The
+# script itself now also reads from email_policies_cloud.bid_review_digest
+# and exits when enabled=false (default).
+#
+# To turn back on: flip ENABLED in /admin/ Email Center -> Bid Review
+# Digest, then re-add the cron line below.
 
 on:
-  schedule:
-    - cron: "0 14 * * 1-5"
+  # schedule:
+  #   - cron: "0 14 * * 1-5"   # 06-07 AM PT M-F -- DISABLED
   workflow_dispatch: {}
 
 concurrency:
@@ -34,5 +37,4 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
           GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
-          ALERT_TO_EMAIL: alex@fusionelectric-inc.com
         run: python send-bid-emails-review-digest.py
