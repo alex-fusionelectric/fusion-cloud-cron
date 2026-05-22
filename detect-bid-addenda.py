@@ -770,8 +770,12 @@ def main():
     sender = (os.environ.get("GMAIL_FROM") or "").strip()
     if not sender:
         raise SystemExit("GMAIL_FROM env var required.")
+    # Recipients (updated 2026-05-22): PE Gabriel added per Alex's request.
+    # ALERT_TO_EMAIL env var still overrides the default if set, but the
+    # default is now Alex + Gabriel together so addenda alerts match the
+    # bid-setup notification policy (PE + Alex).
     recipient = (os.environ.get("ALERT_TO_EMAIL") or
-                 "alex@fusionelectric-inc.com").strip()
+                 "alex@fusionelectric-inc.com,gabriel.toler@fusionelectric-inc.com").strip()
 
     svc = gmail_service()
     dbx = dropbox_client()
