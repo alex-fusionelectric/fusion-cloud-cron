@@ -63,11 +63,65 @@ def _sb(method, path, body=None, extra=None, timeout=30):
 
 
 def fetch_unnotified():
+    """Fetch un-notified rows from bid_setup_completions_cloud.
+
+    Safety cap: ignore rows older than STALE_CUTOFF_HOURS. This guards
+    against the failure mode where the cron is broken for weeks (most
+    recently 2026-05-22: missing google-api-python-client dep silently
+    failed every nightly run for 2-3 weeks, then fixing the dep flushed
+    14 stale completion emails to PE + Alex at 1:04 AM). We stamp the
+    too-old rows as notified WITHOUT sending so they drop off the queue
+    permanently -- if anyone needs to look them up they're still in
+    bid_setup_completions_cloud, just not emailed years late.
+    """
     qs = "select=*&notified_at=is.null&order=completed_at.asc&limit=50"
     st, body = _sb("GET", f"{COMPLETIONS_TABLE}?{qs}")
     if st != 200:
         raise SystemExit(f"completions GET failed: HTTP {st} {body[:200]!r}")
-    return json.loads(body)
+    rows = json.loads(body)
+    if not rows:
+        return rows
+
+    STALE_CUTOFF_HOURS = 48
+    now_utc = datetime.now(timezone.utc)
+    fresh, stale = [], []
+    for r in rows:
+        c = r.get("completed_at")
+        if not c:
+            # No completed_at -- treat as suspect, mark notified+skip.
+            stale.append(r)
+            continue
+        try:
+            ts = datetime.fromisoformat(c.replace("Z", "+00:00"))
+        except Exception:  # noqa: BLE001
+            stale.append(r)
+            continue
+        age_hours = (now_utc - ts).total_seconds() / 3600.0
+        if age_hours > STALE_CUTOFF_HOURS:
+            stale.append(r)
+        else:
+            fresh.append(r)
+
+    if stale:
+        # Burn the stale ones in one batch PATCH so the next cron run
+        # doesn't have to reconsider them. notified_at gets stamped to
+        # now even though no email was sent -- the row stays in the
+        # table as a historical record, just won't re-fire.
+        marker = now_utc.isoformat(timespec="seconds")
+        for r in stale:
+            rid = r.get("id")
+            if not rid:
+                continue
+            try:
+                _sb("PATCH",
+                    f"{COMPLETIONS_TABLE}?id=eq.{urllib.parse.quote(str(rid), safe='')}",
+                    body={"notified_at": marker,
+                          "notify_skipped_reason": f"older than {STALE_CUTOFF_HOURS}h on first-success run"})
+            except Exception as e:  # noqa: BLE001
+                print(f"  [warn] stale-skip PATCH failed for {rid}: {e}", file=sys.stderr)
+        print(f"  [stale-skip] burned {len(stale)} completion row(s) older than "
+              f"{STALE_CUTOFF_HOURS}h without sending email")
+    return fresh
 
 
 def gmail_service():
