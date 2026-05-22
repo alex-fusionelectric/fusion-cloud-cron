@@ -1,16 +1,24 @@
-name: Send bid-setup notifications
+name: Send bid-setup notifications (DISABLED)
 
-# Picks up rows in public.bid_setup_completions_cloud where notified_at IS
-# NULL, sends each one as an email manifest (autofill summary + plans/specs
-# files added) to the recipients listed on the row, then stamps notified_at
-# so we don't double-send.
+# DISABLED 2026-05-22 -- this cron sent the old plain-text "Bid setup
+# complete" format that flooded Alex + Gabriel at 1:04 AM PT after a
+# 2-3 week silent failure recovered. The new HTML-format bid-setup
+# email is sent directly from the watcher (via send-bid-setup-email.js
+# Netlify function) the instant setup finishes -- the cron was a
+# redundant backup path that we no longer want.
 #
-# Runs every 5 minutes -- watcher writes completion rows on Alex's PC, this
-# picks them up shortly after.
+# Schedule is intentionally removed so this can only fire by manual
+# workflow_dispatch, and the script itself has a 48h staleness guard
+# (commit 1a0b951) that drops un-notified rows older than 48h.
+#
+# To re-enable: restore the cron line below + DELETE this comment block.
+# Before doing that, confirm with Alex that the old plain-text format
+# is what we actually want -- there's a follow-up plan to consolidate
+# email policy into an admin-managed email_policies_cloud table.
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
+  # schedule:
+  #   - cron: "*/5 * * * *"   # DISABLED -- see comment block above
   workflow_dispatch: {}
 
 concurrency:
