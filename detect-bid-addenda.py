@@ -770,12 +770,27 @@ def main():
     sender = (os.environ.get("GMAIL_FROM") or "").strip()
     if not sender:
         raise SystemExit("GMAIL_FROM env var required.")
-    # Recipients (updated 2026-05-22): PE Gabriel added per Alex's request.
-    # ALERT_TO_EMAIL env var still overrides the default if set, but the
-    # default is now Alex + Gabriel together so addenda alerts match the
-    # bid-setup notification policy (PE + Alex).
-    recipient = (os.environ.get("ALERT_TO_EMAIL") or
-                 "alex@fusionelectric-inc.com,gabriel.toler@fusionelectric-inc.com").strip()
+    # Recipient list comes from email_policies_cloud (policy_key='addenda_alert')
+    # via the shared helper, so the /admin/ Email Center tab can flip a
+    # checkbox to change who gets pinged without re-deploying. Helper
+    # falls back to ['alex@..','gabriel.toler@..'] if the table is missing
+    # or the Supabase fetch errors. Empty list -> policy disabled -> skip
+    # all sends this run.
+    # ALERT_TO_EMAIL env var still overrides everything as an emergency
+    # break-glass if Supabase is down and we need to redirect.
+    from _email_policies import get_recipients_for, record_send
+    env_override = (os.environ.get("ALERT_TO_EMAIL") or "").strip()
+    if env_override:
+        recipients = [e.strip() for e in env_override.split(",") if "@" in e]
+        print(f"  [policy] ALERT_TO_EMAIL override -> {len(recipients)} recipients")
+    else:
+        recipients = get_recipients_for("addenda_alert")
+        if not recipients:
+            print("  [policy] addenda_alert is disabled OR no recipients in email_policies_cloud -- skipping all sends.")
+            return
+        print(f"  [policy] email_policies_cloud.addenda_alert -> {recipients}")
+    # send_alert() expects a comma-joined string for the To: header
+    recipient = ",".join(recipients)
 
     svc = gmail_service()
     dbx = dropbox_client()
@@ -882,6 +897,12 @@ def main():
             send_alert(svc, sender, recipient, new_for_email)
             for n in new_for_email:
                 stamp_notified(n["detection"]["id"])
+            # Audit-trail: stamp last_sent_at on the policy row so the
+            # Email Center UI can show 'last sent X to N recipients'.
+            try:
+                record_send("addenda_alert", recipients)
+            except Exception:
+                pass
         except Exception as e:
             print(f"[err] failed to send alert: {e}", file=sys.stderr)
             sys.exit(3)
