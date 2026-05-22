@@ -1,23 +1,25 @@
 """reverse-auto-filed-quotes.py -- One-shot UNDO of the auto-file-vendor-quotes
-cron's runs. Walks every row in quote_files_cloud, deletes the corresponding
-Dropbox file, removes the AUTO-FILED Gmail label from the source thread,
-and finally deletes the audit row. Restores both bids' QUOTES folders to
-the state they were in before the cron started running.
+cron's runs. Lists the live QUOTES folder for each target bid via the
+Dropbox API, deletes only files matching the cron's
+'<Vendor> - YYYY-MM-DD - <original>' naming pattern, and leaves anything
+else (manually-placed quotes) untouched.
 
-Intentionally separate workflow + manual dispatch only -- not something we
-want a misfire on.
+Also clears matching rows from quote_files_cloud if any are still there.
 
 Required env (same secrets the original cron uses):
   SUPABASE_SERVICE_KEY
-  GMAIL_TOKEN_JSON
+  GMAIL_TOKEN_JSON          (only used for AUTO-FILED label cleanup)
   DROPBOX_REFRESH_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET
 
-Dry-run support: set DRY_RUN=1 to print the plan without deleting anything.
+Optional env:
+  EST_NUMBER_FILTER  -- only act on this EST# (e.g. '26-243'). Empty = all.
+  DRY_RUN            -- '1' to preview without making changes.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -34,16 +36,21 @@ except ImportError as exc:
 try:
     import dropbox  # type: ignore
     from dropbox import common as dropbox_common  # type: ignore
+    from dropbox.exceptions import AuthError  # type: ignore
 except ImportError as exc:
     print(f"[error] dropbox lib missing: {exc}", file=sys.stderr)
     sys.exit(2)
 
 
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
-TABLE        = "quote_files_cloud"
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 DRY_RUN      = (os.environ.get("DRY_RUN") or "").strip() == "1"
-EST_FILTER   = (os.environ.get("EST_NUMBER_FILTER") or "").strip()  # empty = all bids
+EST_FILTER   = (os.environ.get("EST_NUMBER_FILTER") or "").strip()
+
+# Cron filenames are '<Vendor> - YYYY-MM-DD - <original>' per
+# auto-file-vendor-quotes.py:filed_filename(). Anything matching this
+# pattern in a QUOTES folder is something the cron put there.
+CRON_FILE_RX = re.compile(r"^.+? - \d{4}-\d{2}-\d{2} - .+", re.IGNORECASE)
 
 
 # --- Supabase --------------------------------------------------------------
@@ -67,36 +74,58 @@ def _sb(method: str, path: str, body=None):
         return r.status, r.read().decode("utf-8")
 
 
-# --- Dropbox ---------------------------------------------------------------
+# --- Dropbox (matches auto-file-vendor-quotes.py exactly) -----------------
 
 def dropbox_client():
-    rt  = os.environ.get("DROPBOX_REFRESH_TOKEN") or ""
-    ak  = os.environ.get("DROPBOX_APP_KEY")       or ""
-    asec = os.environ.get("DROPBOX_APP_SECRET")    or ""
+    rt = (os.environ.get("DROPBOX_REFRESH_TOKEN") or "").strip()
+    ak = (os.environ.get("DROPBOX_APP_KEY") or "").strip()
+    asec = (os.environ.get("DROPBOX_APP_SECRET") or "").strip()
     if not (rt and ak and asec):
-        raise SystemExit("DROPBOX_REFRESH_TOKEN / DROPBOX_APP_KEY / DROPBOX_APP_SECRET required")
+        raise SystemExit("DROPBOX_REFRESH_TOKEN/APP_KEY/APP_SECRET all required")
     dbx = dropbox.Dropbox(
-        oauth2_refresh_token=rt, app_key=ak, app_secret=asec,
-        timeout=30,
+        oauth2_refresh_token=rt, app_key=ak, app_secret=asec, timeout=60,
     )
-    # The watcher operates on the team namespace; match the original cron.
     try:
-        team_root = os.environ.get("DROPBOX_TEAM_ROOT_NAMESPACE_ID")
-        if team_root:
-            dbx = dbx.with_path_root(dropbox_common.PathRoot.root(team_root))
-    except Exception as e:
-        print(f"  [warn] could not set Dropbox path root: {e}")
+        acct = dbx.users_get_current_account()
+    except AuthError as e:
+        raise SystemExit(f"Dropbox auth failed: {e}")
+    ri = acct.root_info
+    root_ns = getattr(ri, "root_namespace_id", None)
+    home_ns = getattr(ri, "home_namespace_id", None)
+    if root_ns and root_ns != home_ns:
+        dbx = dbx.with_path_root(dropbox_common.PathRoot.root(root_ns))
+        print(f"  [info] using Dropbox team root namespace {root_ns}")
     return dbx
 
 
-def dropbox_delete(dbx, path: str) -> tuple[bool, str]:
+def list_quotes_folder(dbx, quotes_path: str) -> list[dict]:
+    """Return [{name, path_lower, path_display}] for every FILE in the folder.
+    Empty list if the folder doesn't exist."""
+    try:
+        res = dbx.files_list_folder(quotes_path, recursive=False, limit=2000)
+    except dropbox.exceptions.ApiError as e:
+        if "not_found" in str(e).lower():
+            return []
+        raise
+    out = []
+    for entry in res.entries:
+        if isinstance(entry, dropbox.files.FileMetadata):
+            out.append({
+                "name": entry.name,
+                "path_lower": entry.path_lower,
+                "path_display": entry.path_display,
+                "size": entry.size,
+            })
+    return out
+
+
+def delete_dropbox_path(dbx, path: str) -> tuple[bool, str]:
     if DRY_RUN:
         return True, "dry-run"
     try:
         dbx.files_delete_v2(path)
         return True, "ok"
     except dropbox.exceptions.ApiError as e:
-        # If the file is already gone, that's fine -- we want it gone.
         msg = str(e)
         if "not_found" in msg.lower():
             return True, "already gone"
@@ -105,115 +134,138 @@ def dropbox_delete(dbx, path: str) -> tuple[bool, str]:
         return False, str(e)[:200]
 
 
-# --- Gmail -----------------------------------------------------------------
+# --- Gmail (for AUTO-FILED label cleanup, best-effort) --------------------
 
-def gmail_service():
+def gmail_service_or_none():
     raw = (os.environ.get("GMAIL_TOKEN_JSON") or "").strip()
     if not raw:
-        raise SystemExit("GMAIL_TOKEN_JSON env var required")
-    creds = Credentials.from_authorized_user_info(json.loads(raw), GMAIL_SCOPES)
-    if not creds.valid and creds.refresh_token:
-        creds.refresh(Request())
-    if not creds.valid:
-        raise SystemExit("Gmail credentials invalid")
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+        return None
+    try:
+        creds = Credentials.from_authorized_user_info(json.loads(raw), GMAIL_SCOPES)
+        if not creds.valid and creds.refresh_token:
+            creds.refresh(Request())
+        if not creds.valid:
+            return None
+        return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    except Exception as e:
+        print(f"  [info] gmail not initialized: {e}")
+        return None
 
 
 def find_label_id(svc, name: str) -> str | None:
+    if not svc: return None
     try:
         labels = svc.users().labels().list(userId="me").execute().get("labels", [])
         for lbl in labels:
             if lbl.get("name") == name:
                 return lbl.get("id")
-    except Exception as e:
-        print(f"  [warn] labels list failed: {e}")
+    except Exception:
+        pass
     return None
 
 
-def remove_label_from_thread(svc, thread_id: str, label_id: str) -> bool:
-    if DRY_RUN:
-        return True
-    try:
-        svc.users().threads().modify(
-            userId="me", id=thread_id,
-            body={"removeLabelIds": [label_id]},
-        ).execute()
-        return True
-    except Exception as e:
-        # Non-fatal -- we still proceed with Dropbox + table deletion.
-        print(f"  [warn] label remove failed for thread {thread_id}: {e}")
-        return False
+# --- Active bids (read from prebid_bids_cloud + bid_setup_completions) ----
+
+def fetch_target_bids() -> list[dict]:
+    """Return [{est_number, dropbox_folder, gmail_label}] for the bids we
+    want to clean -- filtered to EST_FILTER when set, otherwise every bid
+    that was ever touched by the auto-filer (anything with a QUOTES
+    folder under it)."""
+    if EST_FILTER:
+        st, body = _sb("GET",
+            f"prebid_bids_cloud?est_number=eq.{urllib.parse.quote(EST_FILTER)}"
+            f"&select=id,est_number,dropbox_folder,gmail_label"
+            f"&order=created_at.desc&limit=10")
+    else:
+        # Pull every prebid bid that has a dropbox folder set. Bigger blast
+        # radius -- only run unfiltered when you mean it.
+        st, body = _sb("GET",
+            "prebid_bids_cloud?dropbox_folder=not.is.null"
+            "&select=id,est_number,dropbox_folder,gmail_label&limit=500")
+    if st != 200:
+        raise SystemExit(f"prebid_bids_cloud GET failed: HTTP {st}: {body[:200]}")
+    rows = json.loads(body)
+    # Dedup by est_number, prefer the row with a non-null dropbox_folder
+    seen: dict = {}
+    for r in rows:
+        est = r.get("est_number")
+        if not est: continue
+        if est not in seen or (r.get("dropbox_folder") and not seen[est].get("dropbox_folder")):
+            seen[est] = r
+    return list(seen.values())
 
 
 # --- Main ------------------------------------------------------------------
 
 def main():
-    print(f"=== reverse-auto-filed-quotes starting (DRY_RUN={DRY_RUN}, EST_FILTER={EST_FILTER or '(all)'}) ===")
-    # 1. Pull rows in quote_files_cloud, optionally filtered to a single EST#
-    qs = f"{TABLE}?select=*&order=filed_at.asc&limit=10000"
-    if EST_FILTER:
-        qs += f"&est_number=eq.{urllib.parse.quote(EST_FILTER)}"
-    st, body = _sb("GET", qs)
-    if st != 200:
-        raise SystemExit(f"quote_files_cloud GET failed: HTTP {st}: {body[:200]}")
-    rows = json.loads(body)
-    print(f"  {len(rows)} row(s) to reverse"
-          + (f" (filtered to EST# {EST_FILTER})" if EST_FILTER else ""))
-    if not rows:
+    print(f"=== reverse-auto-filed-quotes starting "
+          f"(DRY_RUN={DRY_RUN}, EST_FILTER={EST_FILTER or '(all touched)'}) ===")
+
+    bids = fetch_target_bids()
+    print(f"  {len(bids)} bid(s) in scope")
+    if not bids:
         print("  nothing to do.")
         return
 
     dbx = dropbox_client()
-    svc = gmail_service()
-    auto_label_id = find_label_id(svc, "AUTO-FILED")
+    svc = gmail_service_or_none()
+    auto_label_id = find_label_id(svc, "AUTO-FILED") if svc else None
     if auto_label_id:
         print(f"  AUTO-FILED label id: {auto_label_id}")
-    else:
-        print("  AUTO-FILED label not found -- skipping label removal step")
 
-    seen_threads: set[str] = set()
     deleted_files = 0
-    skipped_files = 0
-    removed_rows = 0
+    kept_manual   = 0
+    skipped       = 0
 
-    for r in rows:
-        rid       = r.get("id")
-        dbx_path  = r.get("dropbox_path") or ""
-        msg_id    = r.get("message_id")    or ""
-        thread_id = r.get("thread_id")     or ""
-        fname     = r.get("filename")      or dbx_path.rsplit("/", 1)[-1]
+    for bid in bids:
+        est = bid.get("est_number") or "?"
+        dbx_folder = (bid.get("dropbox_folder") or "").rstrip("/")
+        if not dbx_folder:
+            print(f"  [skip] EST# {est}: no dropbox_folder set")
+            continue
+        quotes_path = dbx_folder + "/QUOTES"
+        print(f"\n  EST# {est}: scanning {quotes_path}")
 
-        # Drop file in Dropbox
-        if dbx_path:
-            ok, detail = dropbox_delete(dbx, dbx_path)
-            if ok:
-                deleted_files += 1
-                print(f"  [del] {dbx_path}  ({detail})")
+        try:
+            files = list_quotes_folder(dbx, quotes_path)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [warn] list failed: {e}")
+            continue
+
+        if not files:
+            print(f"  [info] empty / missing folder, nothing to clean")
+            continue
+        print(f"  found {len(files)} file(s) in QUOTES")
+
+        for f in files:
+            name = f["name"]
+            if CRON_FILE_RX.match(name):
+                ok, detail = delete_dropbox_path(dbx, f["path_display"])
+                if ok:
+                    deleted_files += 1
+                    print(f"    [del] {name}  ({detail})")
+                else:
+                    skipped += 1
+                    print(f"    [skip-err] {name}  ({detail})")
             else:
-                skipped_files += 1
-                print(f"  [skip] {dbx_path}  ({detail})")
-        else:
-            skipped_files += 1
-            print(f"  [skip] no dropbox_path on row id={rid}")
+                kept_manual += 1
+                print(f"    [keep] {name}  (manual, no Vendor-Date prefix)")
 
-        # Remove AUTO-FILED label from the source thread (once per thread).
-        if auto_label_id and thread_id and thread_id not in seen_threads:
-            seen_threads.add(thread_id)
-            remove_label_from_thread(svc, thread_id, auto_label_id)
-
-        # Delete the audit row
-        if not DRY_RUN and rid is not None:
-            try:
-                _sb("DELETE", f"{TABLE}?id=eq.{urllib.parse.quote(str(rid), safe='')}")
-                removed_rows += 1
-            except Exception as e:
-                print(f"  [warn] DELETE row id={rid} failed: {e}")
+    # Clean up any matching audit rows still in quote_files_cloud
+    rows_cleared = 0
+    if not DRY_RUN and EST_FILTER:
+        try:
+            _sb("DELETE",
+                f"quote_files_cloud?est_number=eq.{urllib.parse.quote(EST_FILTER)}")
+            rows_cleared = "all-for-EST"
+        except Exception as e:
+            print(f"  [warn] quote_files_cloud cleanup failed: {e}")
 
     print(f"\n=== done ===")
-    print(f"  deleted from Dropbox: {deleted_files}")
-    print(f"  skipped:              {skipped_files}")
-    print(f"  rows removed:         {removed_rows}")
-    print(f"  threads un-labeled:   {len(seen_threads)}")
+    print(f"  deleted from Dropbox:  {deleted_files}")
+    print(f"  kept (manual files):   {kept_manual}")
+    print(f"  delete errors:         {skipped}")
+    print(f"  quote_files_cloud:     {rows_cleared}")
     if DRY_RUN:
         print("\n  DRY_RUN was set -- nothing was actually changed.")
 
