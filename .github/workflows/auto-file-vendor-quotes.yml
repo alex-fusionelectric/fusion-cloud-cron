@@ -1,15 +1,25 @@
-name: Auto-file vendor quotes
+name: Auto-file vendor quotes (DISABLED)
 
-# Pulls vendor-quote attachments from each active bid's Gmail label and
-# uploads them into <bid_folder>/QUOTES/. Idempotent via quote_files_cloud
-# (keyed on message_id + attachment_id).
+# DISABLED 2026-05-22 -- Alex flagged that the filter is too loose:
+# the cron was filing email signature images (QualitySound logos,
+# Outlook-*.png, "3D Logo.png", image001.png/gif from signature blocks)
+# into bid QUOTES folders. ~20 files of junk landed in EST# 26-239
+# OTIS ES ALAMEDA on first successful run after the dep fix.
 #
-# Runs every 15 minutes during business hours; idle outside business hours
-# to save GitHub Actions minutes.
+# What needs to happen before re-enabling:
+#   1. Tighten the filter -- PDF/XLSX/DOCX whitelist (no images), raise
+#      MIN_ATTACHMENT_BYTES, exclude filenames matching Outlook-*,
+#      image00*.png, *Logo*, *signature*, etc.
+#   2. Sender-domain heuristic -- vendor quotes come from vendor
+#      domains, not plan-room / CC services.
+#   3. Optional: AI classifier on the body to confirm "this looks like
+#      a quote" before filing.
+#
+# Until that's in, manual workflow_dispatch only -- schedule is commented.
 
 on:
-  schedule:
-    - cron: "*/15 13-23 * * 1-5"   # M-F 13:00-23:59 UTC = 06:00-16:59 PT
+  # schedule:
+  #   - cron: "*/15 13-23 * * 1-5"   # DISABLED -- see comment above
   workflow_dispatch: {}
 
 concurrency:
