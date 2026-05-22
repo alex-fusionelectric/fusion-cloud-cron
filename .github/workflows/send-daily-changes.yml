@@ -1,0 +1,37 @@
+name: Send daily software changes digest
+
+# "What shipped today" email. Pulls commits from the last 24h across
+# the Portal + Cron repos, groups by area, sends an HTML digest to
+# the recipients listed in email_policies_cloud.daily_changes.
+#
+# Runs Mon-Fri at 5:30 PM PT (= 00:30 UTC Tue-Sat in PDT;
+# 01:30 UTC Tue-Sat in PST). We schedule the PDT slot and accept the
+# 1-hour drift in winter -- close enough for an end-of-day digest.
+
+on:
+  schedule:
+    - cron: "30 0 * * 2-6"   # 00:30 UTC Tue-Sat = 5:30 PM PT (PDT) Mon-Fri
+  workflow_dispatch: {}
+
+concurrency:
+  group: send-daily-changes
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Send daily changes digest
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GMAIL_TOKEN_JSON:     ${{ secrets.GMAIL_TOKEN_JSON }}
+          GMAIL_FROM:           ${{ secrets.GMAIL_FROM }}
+          GH_TOKEN:             ${{ secrets.GITHUB_TOKEN }}
+        run: python send-daily-changes.py
