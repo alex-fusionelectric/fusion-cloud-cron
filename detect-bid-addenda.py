@@ -707,12 +707,106 @@ def detect_in_folder(dbx, bid_folder: str) -> dict[int, dict]:
 
 # --- Notification email ----------------------------------------------------
 
+def _esc_html(s):
+    return (str(s or "")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _render_addenda_html(new_addenda: list[dict]) -> str:
+    """HTML body matching the bid-setup-complete email's visual family:
+    dark header strip + white body, per-addendum cards with the
+    mismatch / sources / subjects laid out cleanly."""
+    cards = ""
+    for a in new_addenda:
+        bid = a["bid"]
+        det = a["detection"]
+        srcs = []
+        if det.get("found_in_gmail"):  srcs.append("Gmail")
+        if det.get("found_in_folder"): srcs.append("Folder")
+        if det.get("found_in_sbx"):    srcs.append("SBX")
+        srcs_html = " &middot; ".join(
+            f'<span style="display:inline-block;padding:1px 7px;border-radius:999px;background:rgba(125,211,252,.18);color:#0369a1;font-size:10px;font-weight:800;letter-spacing:.3px;">{_esc_html(s)}</span>'
+            for s in srcs
+        ) or '<span style="color:#94a3b8;font-size:11px;">unknown source</span>'
+        mismatch = (len(srcs) == 1)
+        mismatch_pill = (
+            '<span style="display:inline-block;padding:1px 7px;border-radius:999px;background:rgba(239,68,68,.16);color:#dc2626;font-size:10px;font-weight:800;letter-spacing:.3px;">&#9888; MISMATCH</span>'
+            if mismatch else
+            '<span style="display:inline-block;padding:1px 7px;border-radius:999px;background:rgba(52,211,153,.16);color:#059669;font-size:10px;font-weight:800;letter-spacing:.3px;">&#10003; SOURCES AGREE</span>'
+        )
+        raw_dt = det.get("updated_at") or det.get("detected_at") or ""
+        try:
+            from datetime import datetime as _dt
+            det_date = _dt.fromisoformat(raw_dt.replace("Z", "+00:00")).strftime("%-m/%-d/%Y")
+        except Exception:
+            det_date = raw_dt[:10] if raw_dt else "unknown"
+        subjects_html = ""
+        if det.get("gmail_subjects"):
+            subjects_html = (
+                '<div style="margin-top:8px;font-size:11px;color:#475569;">'
+                + "<br>".join(
+                    f'<span style="color:#94a3b8;">Subject:</span> {_esc_html(s[:140])}'
+                    for s in det["gmail_subjects"][:2]
+                )
+                + "</div>"
+            )
+        folder_html = ""
+        if det.get("folder_path"):
+            files = (det.get("folder_files") or [])[:5]
+            folder_html = (
+                '<div style="margin-top:8px;font-size:11px;color:#475569;">'
+                f'<span style="color:#94a3b8;">Folder:</span> <code style="font-size:10px;background:#f1f5f9;padding:1px 5px;border-radius:4px;">{_esc_html(det["folder_path"])}</code>'
+            )
+            if files:
+                folder_html += (
+                    '<br><span style="color:#94a3b8;">Files:</span> '
+                    + _esc_html(", ".join(files))
+                )
+            folder_html += "</div>"
+
+        cards += f"""<div style="border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin-bottom:12px;background:#fff;">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">
+            <div style="min-width:0;flex:1;">
+              <div style="font-size:13px;font-weight:800;color:#0f172a;">EST# {_esc_html(bid.get("est_number") or "?")} &middot; {_esc_html((bid.get("project_name") or "")[:60])}</div>
+              <div style="font-size:11px;color:#64748b;margin-top:3px;">Addendum #{_esc_html(det.get("addendum_number") or "?")} &middot; detected {_esc_html(det_date)}</div>
+            </div>
+            <div style="flex-shrink:0;">{mismatch_pill}</div>
+          </div>
+          <div style="margin-top:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <span style="color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:.4px;font-weight:800;">Sources:</span>
+            {srcs_html}
+          </div>
+          {subjects_html}
+          {folder_html}
+        </div>"""
+
+    n = len(new_addenda)
+    return f"""<!doctype html><html><body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
+<div style="max-width:640px;margin:24px auto;">
+  <div style="background:#0f172a;padding:22px 28px;border-radius:10px 10px 0 0;">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:#475569;margin-bottom:6px;">Fusion Bid Addenda</div>
+    <div style="font-size:24px;font-weight:900;color:#f8fafc;">{n} new addend{"a" if n != 1 else "um"} detected</div>
+    <div style="font-size:13px;color:#fbbf24;margin-top:4px;">Cross-checked Gmail / SBX / spec PDFs / Dropbox folder</div>
+  </div>
+  <div style="background:#fff;color:#0f172a;padding:22px 28px;border:1px solid #e2e8f0;border-top:none;">
+    {cards}
+  </div>
+  <div style="background:#fffbeb;border:1px solid #fde68a;border-top:none;padding:16px 28px;border-radius:0 0 10px 10px;">
+    <div style="font-size:11px;font-weight:900;color:#92400e;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;">&#9888; What to do</div>
+    <div style="font-size:12px;color:#78350f;line-height:1.6;">
+      <strong>Mismatch (red pill):</strong> the addendum lives in only one place. Pull the missing piece (download from Gmail into PLANS &amp; SPECS, or check Gmail for a corresponding email) <em>before bid day</em>.<br>
+      <strong>Sources agree (green pill):</strong> incorporate the addendum into your numbers; it's already in both sources.
+    </div>
+  </div>
+</div>
+</body></html>"""
+
+
 def send_alert(svc, sender: str, recipient: str,
                new_addenda: list[dict]) -> None:
     if not new_addenda: return
-    lines = [
-        f"{len(new_addenda)} new bid addendum/addenda detected.\n",
-    ]
+    # ---- Plain-text body (fallback for any non-HTML client) ----
+    lines = [f"{len(new_addenda)} new bid addendum/addenda detected.\n"]
     for a in new_addenda:
         bid = a["bid"]
         det = a["detection"]
@@ -721,7 +815,6 @@ def send_alert(svc, sender: str, recipient: str,
         if det.get("found_in_folder"): srcs.append("Folder")
         if det.get("found_in_sbx"):    srcs.append("SBX")
         if not srcs: srcs = ["unknown source"]
-        # Format detected date MM/DD/YYYY from ISO updated_at
         raw_dt = det.get("updated_at") or det.get("detected_at") or ""
         try:
             from datetime import datetime as _dt
@@ -737,27 +830,22 @@ def send_alert(svc, sender: str, recipient: str,
         if det.get("gmail_subjects"):
             for s in det["gmail_subjects"][:2]:
                 lines.append(f"    Subject: {s[:120]}")
-        if det.get("folder_path"):
-            lines.append(f"    Folder: {det['folder_path']}")
-            if det.get("folder_files"):
-                lines.append(f"    Files: {', '.join((det['folder_files'] or [])[:5])}")
         lines.append("")
 
-    lines.append(
-        "What to do:\n"
-        "  - If 'Mismatch: YES', the addendum exists in only one place. "
-        "Pull the missing piece (download from Gmail into PLANS & SPECS, "
-        "or check Gmail for a corresponding email) before bid day.\n"
-        "  - If both sources have it, you're good -- this is a new "
-        "addendum to incorporate into your numbers.\n"
-    )
-    body = "\n".join(lines)
-    subj = (
-        f"[Fusion Bid Addenda] {len(new_addenda)} new addend"
-        f"{'a' if len(new_addenda) != 1 else 'um'} detected"
-    )
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["From"] = sender; msg["To"] = recipient; msg["Subject"] = subj
+    plain_body = "\n".join(lines)
+    html_body = _render_addenda_html(new_addenda)
+    subj = (f"[Fusion Bid Addenda] {len(new_addenda)} new addend"
+            f"{'a' if len(new_addenda) != 1 else 'um'} detected")
+
+    # multipart/alternative so clients pick HTML when available, fall
+    # back to plain otherwise.
+    from email.mime.multipart import MIMEMultipart as _MM
+    msg = _MM("alternative")
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg["Subject"] = subj
+    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     svc.users().messages().send(userId="me", body={"raw": raw}).execute()
     print(f"[ok] alert sent to {recipient}: {subj}")
