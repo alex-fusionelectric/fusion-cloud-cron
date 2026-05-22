@@ -254,7 +254,7 @@ def load_dismissed_ids():
         return set()
 
 
-OPTIONAL_COLS = ("forwarded_by", "original_sender_name", "addenda_count", "addenda_numbers")
+OPTIONAL_COLS = ("forwarded_by", "original_sender_name", "addenda_count", "addenda_numbers", "user_labeled")
 
 
 def upsert_invitations(rows):
@@ -506,14 +506,25 @@ def main():
     query = f"{GMAIL_QUERY} newer_than:{days}d"
     print(f"Gmail query pass 1 (cap {cap}): {query[:120]}...")
     candidates = _fetch_candidates(query, cap)
+    for m in candidates:
+        m["_source_pass"] = "external_sender"
     print(f"  Pass 1: {len(candidates)} messages")
 
     # Pass 2: 00-POTENTIAL BIDS label (no sender filter — Jake/team forward bids
     # here from BuildingConnected etc.; the From: shows Fusion so pass 1 misses them)
     label_query = f"{POTENTIAL_BIDS_LABEL_QUERY} newer_than:{days}d"
     label_candidates = _fetch_candidates(label_query, 200)
+    # Track every thread that the human placed in the label, even if it
+    # was also found by Pass 1. user_labeled wins on conflict because
+    # the human signal is authoritative.
+    labeled_ids = {m["id"] for m in label_candidates}
+    for m in candidates:
+        if m["id"] in labeled_ids:
+            m["_source_pass"] = "label_scan"
     seen_ids = {m["id"] for m in candidates}
     new_from_label = [m for m in label_candidates if m["id"] not in seen_ids]
+    for m in new_from_label:
+        m["_source_pass"] = "label_scan"
     candidates.extend(new_from_label)
     print(f"  Pass 2 (00-POTENTIAL BIDS label): {len(label_candidates)} found, {len(new_from_label)} new")
 
@@ -526,6 +537,8 @@ def main():
     internal_candidates = _fetch_candidates(internal_query, 150)
     seen_ids.update(m["id"] for m in candidates)
     new_from_internal = [m for m in internal_candidates if m["id"] not in seen_ids]
+    for m in new_from_internal:
+        m["_source_pass"] = "internal_forward"
     candidates.extend(new_from_internal)
     print(f"  Pass 3 (internal forwards): {len(internal_candidates)} found, {len(new_from_internal)} new")
     print(f"Total candidates after all passes: {len(candidates)}")
@@ -567,6 +580,11 @@ def main():
             # drags in bid-setup-complete notifications, daily digests,
             # vendor replies, etc. None of those are real invitations,
             # and Claude can occasionally be tricked by them.
+            #
+            # EXCEPTION: candidates from Pass 2 (00-POTENTIAL BIDS label)
+            # bypass these filters entirely — a human deliberately put
+            # them there, so we honor the label as authoritative.
+            user_labeled = (m.get("_source_pass") == "label_scan")
             sender_email_lc = parseaddr(sender)[1].lower()
             sender_is_internal = (
                 sender_email_lc.endswith("@fusionelectric-inc.com")
@@ -579,12 +597,13 @@ def main():
             EST_LABELED_RX = re.compile(r"\bEST#?\s*\d{2}-\d{3,4}\b", re.IGNORECASE)
             EST_LOOSE_RX   = re.compile(r"\b\d{2}-\d{3,4}\b")
             skip_reason = None
-            if sender_is_internal and not has_forward:
-                skip_reason = "internal_no_forward"
-            elif EST_LABELED_RX.search(subject) or EST_LABELED_RX.search(body or ""):
-                skip_reason = "has_est_label"
-            elif EST_LOOSE_RX.search(subject):  # subject only — body matches too aggressive
-                skip_reason = "est_in_subject"
+            if not user_labeled:
+                if sender_is_internal and not has_forward:
+                    skip_reason = "internal_no_forward"
+                elif EST_LABELED_RX.search(subject) or EST_LABELED_RX.search(body or ""):
+                    skip_reason = "has_est_label"
+                elif EST_LOOSE_RX.search(subject):  # subject only — body matches too aggressive
+                    skip_reason = "est_in_subject"
 
             if skip_reason:
                 ext = {"is_invitation": False, "reason": skip_reason}
@@ -597,8 +616,21 @@ def main():
             if ext is None:
                 skipped += 1
                 continue
+            # User-labeled rows: trust the human signal. Claude still
+            # extracts structured fields (due date, GC, location, etc.)
+            # but we override is_invitation=True so the radar shows it.
+            if user_labeled:
+                ext["is_invitation"] = True
+                ext["user_labeled"] = True
             kv_upsert(ck, ext)
             time.sleep(0.2)
+        # If this candidate is user-labeled (Pass 2) but the cache has
+        # a stale not-invitation verdict from a prior run, override at
+        # runtime so the human label always wins without forcing a
+        # full re-classification.
+        if (m.get("_source_pass") == "label_scan") and not ext.get("is_invitation"):
+            ext["is_invitation"] = True
+            ext["user_labeled"] = True
         if not ext.get("is_invitation"):
             continue
 
@@ -641,7 +673,10 @@ def main():
             or "CALIFORNIA" in _loc
             or any(c in _loc for c in _CA_CITIES)
         )
-        if _loc and _OUT_OF_STATE.search(_loc) and not _ca_explicit:
+        # User-labeled rows bypass the out-of-state filter too — if a
+        # human dragged it into 00-POTENTIAL BIDS, they wanted it shown.
+        _user_labeled_row = ext.get("user_labeled") or (m.get("_source_pass") == "label_scan")
+        if _loc and _OUT_OF_STATE.search(_loc) and not _ca_explicit and not _user_labeled_row:
             print(f"  [skip] out-of-state location: {ext.get('location')!r}")
             continue
 
@@ -724,6 +759,11 @@ def main():
             "original_sender_name": (ext.get("original_sender_name") or "")[:200] or None,
             "addenda_count":        int(ext.get("addenda_count") or 0),
             "addenda_numbers":      ext.get("addenda_numbers") or [],
+            # user_labeled = TRUE when found via Pass 2 (00-POTENTIAL BIDS
+            # label scan). The radar + Gmail extension treat this as
+            # authoritative and skip heuristic filters. Column added by
+            # bid_invitations_user_labeled_col.sql.
+            "user_labeled":         bool(_user_labeled_row),
         }
         rows.append(row)
 
