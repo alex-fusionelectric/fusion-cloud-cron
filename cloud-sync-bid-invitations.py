@@ -274,16 +274,20 @@ def upsert_invitations(rows):
         headers_extra={"Prefer": "resolution=merge-duplicates,return=minimal"},
     )
     # If the migration for the new optional columns hasn't been run yet,
-    # Supabase will reject the whole batch with "column ... does not exist".
-    # Strip those columns and retry so the existing core fields still write.
+    # Supabase rejects the batch. Two known error shapes we retry on:
+    #   - PGRST204 "Could not find the '<col>' column ... in the schema cache"
+    #   - generic 42703 "column ... does not exist"
+    # Strip the optional columns and retry so the existing core fields write.
     if status == 400 and isinstance(resp, (bytes, bytearray)):
         resp_txt = resp.decode("utf-8", errors="replace")
-        if "does not exist" in resp_txt and any(c in resp_txt for c in OPTIONAL_COLS):
-            print(f"  [retry] new column(s) missing — re-upserting without {OPTIONAL_COLS}")
-            stripped = []
-            for r in rows:
-                r2 = {k: v for k, v in r.items() if k not in OPTIONAL_COLS}
-                stripped.append(r2)
+        col_missing = (
+            "PGRST204" in resp_txt
+            or "Could not find the" in resp_txt
+            or "does not exist" in resp_txt
+        )
+        if col_missing and any(c in resp_txt for c in OPTIONAL_COLS):
+            print(f"  [retry] optional columns missing — stripping {OPTIONAL_COLS} and retrying")
+            stripped = [{k: v for k, v in r.items() if k not in OPTIONAL_COLS} for r in rows]
             status, resp = _sb_request(
                 "POST", INVITATIONS_TABLE, body=stripped,
                 headers_extra={"Prefer": "resolution=merge-duplicates,return=minimal"},
