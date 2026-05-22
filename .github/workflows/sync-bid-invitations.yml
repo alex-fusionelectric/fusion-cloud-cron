@@ -12,7 +12,9 @@ name: Sync Bid Invitations (Bid Radar)
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # Every 5 minutes — classifier is cache-friendly so re-runs are nearly
+    # free, and Bid Radar lag should be measured in minutes not 15-min windows.
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 concurrency:

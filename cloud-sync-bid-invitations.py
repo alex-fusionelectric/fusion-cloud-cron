@@ -44,14 +44,14 @@ try:
     from googleapiclient.discovery import build  # type: ignore
     from google.oauth2.credentials import Credentials  # type: ignore
     from google.auth.transport.requests import Request  # type: ignore
+except ImportError as exc:
+    print(f"[error] google api libs missing: {exc}", file=sys.stderr)
+    sys.exit(2)
 
 try:
     from _claude_log import log_claude_call
 except ImportError:
     def log_claude_call(**kwargs): pass  # no-op fallback
-except ImportError as exc:
-    print(f"[error] google api libs missing: {exc}", file=sys.stderr)
-    sys.exit(2)
 
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 INVITATIONS_TABLE = "bid_invitations"
@@ -83,7 +83,11 @@ GMAIL_QUERY = (
       'subject:"request for quotation" OR subject:RFP OR subject:RFQ OR '
       'subject:"bid opportunity" OR subject:"prequalification" OR '
       'subject:"quote request" OR subject:"subcontractor bid" OR '
-      'subject:"subcontractor bid"'
+      # Looser patterns that pick up direct-GC outreach which doesn't use
+      # ITB/RFP boilerplate (e.g. Marina Mechanical's "bid request 05/28").
+      'subject:"bid request" OR subject:"request for bid" OR '
+      'subject:"requesting quotes" OR subject:"electrical bid" OR '
+      'subject:"electrical proposal" OR subject:"electrical quote"'
     ") "
     "-from:fusionelectric-inc.com "
     "-from:fusionelectricinc.onmicrosoft.com"
@@ -94,6 +98,93 @@ GMAIL_QUERY = (
 # Because the From: shows a Fusion address (forwarder), the main GMAIL_QUERY
 # excludes them. This separate label scan catches everything in that folder.
 POTENTIAL_BIDS_LABEL_QUERY = "label:estimating-current-bids-00-potential-bids"
+
+# Third query: catch forwards from internal Fusion addresses even when the
+# email is NOT in the 00-POTENTIAL BIDS label. Pass 1's `-from:fusionelectric`
+# exclusion drops anything Jade/Jake/etc. forwarded directly to Alex, so we
+# query the internal-sender side separately and the body parser
+# (parse_forwarded_block, below) re-attributes to the original external sender.
+INTERNAL_FORWARDS_QUERY = (
+    "(from:fusionelectric-inc.com OR from:fusionelectricinc.onmicrosoft.com) "
+    '(subject:"Fwd" OR subject:"Fw:" OR subject:"FW:" OR '
+    'subject:"bid" OR subject:"ITB" OR subject:"RFP" OR subject:"RFQ" OR '
+    'subject:"invitation" OR subject:"request" OR subject:"addend" OR '
+    'subject:"prequalification" OR subject:"plans" OR subject:"specs")'
+)
+
+
+# --- Forwarded-message parsing ---------------------------------------------
+#
+# When an internal Fusion user (e.g., Jade) forwards an external GC's bid
+# invitation to Alex, the Gmail `From:` header shows the forwarder, not the
+# original sender. We need to re-attribute so the classifier sees the real
+# GC and Bid Radar shows correct sender_org.
+
+FORWARD_MARKER_RE = re.compile(
+    r"-{3,}\s*Forwarded message\s*-{3,}|^Begin forwarded message:",
+    re.IGNORECASE | re.MULTILINE,
+)
+FORWARD_FROM_RE = re.compile(
+    r"From:\s*(?P<name>[^<\n]*?)\s*<(?P<email>[^>\s]+@[^>\s]+)>",
+    re.IGNORECASE,
+)
+FORWARD_SUBJ_RE = re.compile(r"^\s*Subject:\s*(?P<subj>[^\n]+)", re.IGNORECASE | re.MULTILINE)
+FORWARD_DATE_RE = re.compile(r"^\s*Date:\s*(?P<date>[^\n]+)", re.IGNORECASE | re.MULTILINE)
+
+
+def parse_forwarded_block(body: str) -> dict | None:
+    """If `body` contains a forwarded-message block, extract the original
+    sender's name + email + subject. Returns None if no marker is found
+    or the From: line can't be parsed."""
+    if not body:
+        return None
+    marker = FORWARD_MARKER_RE.search(body)
+    if not marker:
+        return None
+    # Look at the ~1500 chars after the marker — that's where the forwarded
+    # headers live. (Anything beyond is the original body.)
+    after = body[marker.end():marker.end() + 1500]
+    from_m = FORWARD_FROM_RE.search(after)
+    if not from_m:
+        return None
+    name = (from_m.group("name") or "").strip().strip('"')
+    email = (from_m.group("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return None
+    subj_m = FORWARD_SUBJ_RE.search(after)
+    date_m = FORWARD_DATE_RE.search(after)
+    return {
+        "name":    name,
+        "email":   email,
+        "domain":  email.split("@", 1)[1] if "@" in email else "",
+        "subject": (subj_m.group("subj").strip() if subj_m else None),
+        "date":    (date_m.group("date").strip() if date_m else None),
+        "header_line": f"{name} <{email}>".strip(),
+    }
+
+
+def detect_addenda(subject: str, body: str) -> dict:
+    """Scan subject + body for addendum/addenda mentions. Returns
+    {"count": N, "numbers": sorted_unique_ints}. count is the max of:
+      - count of distinct numbered addenda found
+      - 1 if any unnumbered "addendum"/"addenda" mention exists
+    Used downstream to show a chip on the radar card and pre-populate
+    bid_addenda_cloud at setup time."""
+    text = f"{subject or ''}\n{body or ''}"
+    nums: set[int] = set()
+    any_mention = False
+    for m in re.finditer(r"\baddend(?:um|a)\s*#?\s*(\d{1,3})?", text, re.IGNORECASE):
+        any_mention = True
+        n_str = m.group(1)
+        if n_str:
+            try: nums.add(int(n_str))
+            except ValueError: pass
+    if not any_mention:
+        return {"count": 0, "numbers": []}
+    return {
+        "count":   max(len(nums), 1) if any_mention else 0,
+        "numbers": sorted(nums),
+    }
 
 
 # --- Supabase REST helpers ---------------------------------------------------
@@ -163,6 +254,9 @@ def load_dismissed_ids():
         return set()
 
 
+OPTIONAL_COLS = ("forwarded_by", "original_sender_name", "addenda_count", "addenda_numbers")
+
+
 def upsert_invitations(rows):
     if not rows:
         return 0
@@ -179,8 +273,27 @@ def upsert_invitations(rows):
         "POST", INVITATIONS_TABLE, body=rows,
         headers_extra={"Prefer": "resolution=merge-duplicates,return=minimal"},
     )
+    # If the migration for the new optional columns hasn't been run yet,
+    # Supabase will reject the whole batch with "column ... does not exist".
+    # Strip those columns and retry so the existing core fields still write.
+    if status == 400 and isinstance(resp, (bytes, bytearray)):
+        resp_txt = resp.decode("utf-8", errors="replace")
+        if "does not exist" in resp_txt and any(c in resp_txt for c in OPTIONAL_COLS):
+            print(f"  [retry] new column(s) missing — re-upserting without {OPTIONAL_COLS}")
+            stripped = []
+            for r in rows:
+                r2 = {k: v for k, v in r.items() if k not in OPTIONAL_COLS}
+                stripped.append(r2)
+            status, resp = _sb_request(
+                "POST", INVITATIONS_TABLE, body=stripped,
+                headers_extra={"Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
     if status not in (200, 201, 204):
-        print(f"  [warn] upsert HTTP {status}: {resp[:300]!r}")
+        try:
+            preview = (resp or b"").decode("utf-8", errors="replace")[:300]
+        except Exception:
+            preview = repr(resp)[:300]
+        print(f"  [warn] upsert HTTP {status}: {preview!r}")
         return 0
     return len(rows)
 
@@ -252,6 +365,31 @@ def _build_snippet(ext: dict) -> str | None:
 # --- Claude classification --------------------------------------------------
 
 def llm_extract(subject, body, sender, *, api_key):
+    # Detect forwarded blocks. When an internal Fusion address forwards a
+    # GC's bid request to Alex, the Gmail `From:` shows the forwarder and the
+    # real sender is buried in the body. Re-attribute before classification.
+    forwarded = parse_forwarded_block(body or "")
+    forwarded_by = None
+    classification_sender = sender
+    classification_subject = subject
+    sender_email = parseaddr(sender or "")[1].lower()
+    if forwarded and (
+        sender_email.endswith("@fusionelectric-inc.com")
+        or sender_email.endswith("@fusionelectricinc.onmicrosoft.com")
+    ):
+        forwarded_by = sender
+        classification_sender = forwarded["header_line"]
+        if forwarded.get("subject"):
+            classification_subject = forwarded["subject"]
+
+    fwd_hint = ""
+    if forwarded_by:
+        fwd_hint = (
+            "\nNOTE: This email was FORWARDED. The Gmail `From:` was an "
+            "internal Fusion address; the line below shows the ORIGINAL "
+            "external sender (use that for general_contractor)."
+        )
+
     prompt = f"""Extract structured data from this email about whether it's a CONSTRUCTION BID INVITATION sent to an electrical contractor (Fusion Electric).
 
 Return ONLY a JSON object (no prose, no markdown). Use null when unknown.
@@ -271,9 +409,17 @@ Return ONLY a JSON object (no prose, no markdown). Use null when unknown.
   "permalink": "URL to the bid portal/listing" or null
 }}
 
+Notes for `bid_due_date`:
+- Look for labeled patterns first: "Bid Due Date:", "Bid Date:", "Due:",
+  "Proposals Due:", "Submit By:", "Quote Due:". These are authoritative.
+- Match relative phrases like "bid request 05/28" or "due 6/1" too —
+  the year is the next future year if month/day already passed in current year.
+- Return null if no date is stated; do NOT guess from the received date.
+{fwd_hint}
+
 EMAIL:
-From: {sender}
-Subject: {subject}
+From: {classification_sender}
+Subject: {classification_subject}
 Body (first 4000 chars):
 {(body or '')[:4000]}
 """
@@ -308,9 +454,24 @@ Body (first 4000 chars):
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except Exception:  # noqa: BLE001
         return None
+    if not isinstance(parsed, dict):
+        return None
+    # Stamp forwarded metadata so the row builder + frontend can use it.
+    if forwarded_by:
+        parsed["forwarded_by"] = forwarded_by
+        parsed["original_sender_email"] = forwarded.get("email")
+        parsed["original_sender_name"] = forwarded.get("name")
+        parsed["original_sender_domain"] = forwarded.get("domain")
+    # Stamp addenda count + numbers so the radar can show a chip and
+    # downstream cron (detect-bid-addenda) can pre-seed bid_addenda_cloud.
+    addenda = detect_addenda(subject, body)
+    if addenda["count"] > 0:
+        parsed["addenda_count"] = addenda["count"]
+        parsed["addenda_numbers"] = addenda["numbers"]
+    return parsed
 
 
 # --- Main -------------------------------------------------------------------
@@ -351,7 +512,19 @@ def main():
     new_from_label = [m for m in label_candidates if m["id"] not in seen_ids]
     candidates.extend(new_from_label)
     print(f"  Pass 2 (00-POTENTIAL BIDS label): {len(label_candidates)} found, {len(new_from_label)} new")
-    print(f"Total candidates after both passes: {len(candidates)}")
+
+    # Pass 3: internal-forwarded emails. Catches bid invitations forwarded by
+    # Jade/Jake/etc. to Alex that aren't in the 00-POTENTIAL BIDS label.
+    # Subject keyword filter avoids dragging the full internal inbox; body
+    # forward-marker check happens during classification (parse_forwarded_block).
+    internal_window = min(days, 14)  # internal volume is high; tighten window
+    internal_query = f"{INTERNAL_FORWARDS_QUERY} newer_than:{internal_window}d"
+    internal_candidates = _fetch_candidates(internal_query, 150)
+    seen_ids.update(m["id"] for m in candidates)
+    new_from_internal = [m for m in internal_candidates if m["id"] not in seen_ids]
+    candidates.extend(new_from_internal)
+    print(f"  Pass 3 (internal forwards): {len(internal_candidates)} found, {len(new_from_internal)} new")
+    print(f"Total candidates after all passes: {len(candidates)}")
 
     cache_keys = [f"bidinv:{m['id']}" for m in candidates]
     cache = kv_get_many(cache_keys)
@@ -420,8 +593,20 @@ def main():
 
         sender_addr = parseaddr(sender)[1].lower()
         sender_org = sender_addr.split("@", 1)[1] if "@" in sender_addr else ""
+
+        # If the classifier detected a forward, the real GC is the ORIGINAL
+        # external sender extracted from the forwarded block, not the Fusion
+        # forwarder. Re-attribute sender / sender_org for the row.
+        forwarded_by = ext.get("forwarded_by")
+        if forwarded_by and ext.get("original_sender_email"):
+            sender_addr = ext.get("original_sender_email")
+            sender_org = (
+                ext.get("original_sender_domain")
+                or (sender_addr.split("@", 1)[1] if "@" in sender_addr else "")
+            )
+
         stable_id = hashlib.sha1(m["id"].encode("utf-8")).hexdigest()[:24]
-        rows.append({
+        row = {
             "id":              stable_id,
             "thread_id":       m.get("threadId"),
             "message_id":      m["id"],
@@ -441,7 +626,19 @@ def main():
             "received_at":     received_iso,
             "generated_at":    dt.datetime.utcnow().isoformat() + "Z",
             "updated_at":      dt.datetime.utcnow().isoformat() + "Z",
-        })
+        }
+        # Optional columns added by add-bid-invitations-forward-cols.sql.
+        # We populate them only when present so the cron still writes if
+        # the migration hasn't been run yet (the upsert will retry without
+        # the optional fields on a 400).
+        if forwarded_by:
+            row["forwarded_by"] = forwarded_by[:300]
+            if ext.get("original_sender_name"):
+                row["original_sender_name"] = ext["original_sender_name"][:200]
+        if ext.get("addenda_count"):
+            row["addenda_count"] = ext["addenda_count"]
+            row["addenda_numbers"] = ext.get("addenda_numbers") or []
+        rows.append(row)
 
     print(f"\nClassified {classified} new (cache misses), {skipped} skipped (LLM failures).")
     print(f"Future-dated invitations to upsert: {len(rows)}")
