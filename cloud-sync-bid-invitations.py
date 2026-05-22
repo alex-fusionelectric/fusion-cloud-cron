@@ -561,6 +561,37 @@ def main():
             subject = headers.get("subject", "")
             sender = headers.get("from", "")
             body = extract_body(full.get("payload", {}))
+
+            # Cheap pre-Claude filters. These exist because Pass 3 widens
+            # the candidate net to ALL internal-Fusion senders, which
+            # drags in bid-setup-complete notifications, daily digests,
+            # vendor replies, etc. None of those are real invitations,
+            # and Claude can occasionally be tricked by them.
+            sender_email_lc = parseaddr(sender)[1].lower()
+            sender_is_internal = (
+                sender_email_lc.endswith("@fusionelectric-inc.com")
+                or sender_email_lc.endswith("@fusionelectricinc.onmicrosoft.com")
+            )
+            has_forward = parse_forwarded_block(body) is not None
+            # EST# marker — labeled form ("EST# 26-275") is the canonical
+            # Fusion notification footprint; loose form (\d{2}-\d{3,4})
+            # catches vendor replies that quote "26-275" in the subject.
+            EST_LABELED_RX = re.compile(r"\bEST#?\s*\d{2}-\d{3,4}\b", re.IGNORECASE)
+            EST_LOOSE_RX   = re.compile(r"\b\d{2}-\d{3,4}\b")
+            skip_reason = None
+            if sender_is_internal and not has_forward:
+                skip_reason = "internal_no_forward"
+            elif EST_LABELED_RX.search(subject) or EST_LABELED_RX.search(body or ""):
+                skip_reason = "has_est_label"
+            elif EST_LOOSE_RX.search(subject):  # subject only — body matches too aggressive
+                skip_reason = "est_in_subject"
+
+            if skip_reason:
+                ext = {"is_invitation": False, "reason": skip_reason}
+                kv_upsert(ck, ext)
+                # No sleep — we didn't hit Claude
+                continue
+
             ext = llm_extract(subject, body, sender, api_key=api_key)
             classified += 1
             if ext is None:
