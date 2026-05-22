@@ -34,6 +34,13 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from html import unescape
 
+# Trade-role classifier — distinguishes actual GCs from electrical
+# competitors / other-trade subs / vendors / consultants on the SBX
+# plan-holder list. Without this, every company was labeled `role="GC"`
+# and the "GCs bidding" panel was useless.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from plan_holder_classifier import classify_role  # noqa: E402
+
 SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 SBX_BASE = "https://login.onlineplanservice.com"
 LOGIN_URL = f"{SBX_BASE}/Login.aspx?ReturnUrl=%2f"
@@ -287,6 +294,36 @@ def collapse_ws(s):
     return re.sub(r"\s+", " ", s or "").strip()
 
 
+# Match the per-bidder div class attribute. Each bidder lives in a div like
+#   <div class="panel-collapse BidderEntry BidderEntry1348485Electrical">
+# where the third token encodes the SBX category. We use this to skip our
+# AI plan_holder_classifier entirely -- SBX already knows the role.
+SBX_CATEGORY_RX = re.compile(r"BidderEntry\d+([A-Za-z/]+)")
+
+def _extract_sbx_category(class_attr: str) -> str:
+    """Pull the SBX-native category out of a BidderEntry div's class string.
+
+    Examples:
+      "panel-collapse BidderEntry BidderEntry1348485GeneralContractor"
+        -> "General Contractor"
+      "panel-collapse BidderEntry BidderEntry1348485Electrical"
+        -> "Electrical"
+      "panel-collapse BidderEntry BidderEntry1348485Business/SupportServices"
+        -> "Business / Support Services"
+      "panel-collapse BidderEntry BidderEntry1348485SecuritySystems"
+        -> "Security Systems"
+    Returns "" if the class string has no recognizable category suffix.
+    """
+    if not class_attr: return ""
+    m = SBX_CATEGORY_RX.search(class_attr)
+    if not m: return ""
+    raw = m.group(1)
+    # CamelCase -> spaced; slashes -> " / " with spaces.
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", raw)
+    s = re.sub(r"\s*/\s*", " / ", s)
+    return s.strip()
+
+
 def parse_detail(html):
     """Best-effort extraction of structured fields from filter.aspx HTML.
     Returns dict; missing fields are None."""
@@ -313,15 +350,20 @@ def parse_detail(html):
     }
 
     # SBX uses Bootstrap panel divs for plan holders — NOT tables.
-    # Each bidder: <div class="panel-collapse BidderEntry ..."> ... </div></div></div>
+    # Each bidder: <div class="panel-collapse BidderEntry BidderEntry<bidPkgId><CategoryName>"> ... </div></div></div>
     # Inside: bold span with &nbsp; prefix = company name, mailto link = email,
     # Ph</abbr>:xxx = phone, <strong>City ST</strong> = city.
+    # The third class token encodes SBX's native category ("General Contractor",
+    # "Electrical", "Equipment", "Fencing", "SecuritySystems", "Surveying" etc.)
+    # which we use INSTEAD of the legacy plan_holder_classifier AI guess.
     seen_ph: set = set()
     for m in re.finditer(
-        r'<div[^>]+class="[^"]*panel-collapse BidderEntry[^"]*"[^>]*>(.*?)</div>\s*</div>\s*</div>',
+        r'<div[^>]+class="([^"]*panel-collapse BidderEntry[^"]*)"[^>]*>(.*?)</div>\s*</div>\s*</div>',
         html, re.DOTALL | re.IGNORECASE
     ):
-        block = m.group(1)
+        class_attr = m.group(1)
+        block = m.group(2)
+        sbx_category = _extract_sbx_category(class_attr)
         nm_m = re.search(
             r'<span[^>]*style="[^"]*font-weight\s*:\s*bold[^"]*"[^>]*>\s*(?:&nbsp;)?\s*([^<]{3,}?)\s*</span>',
             block, re.IGNORECASE)
@@ -344,6 +386,7 @@ def parse_detail(html):
         out["plan_holders"].append({
             "name": name, "confirmed": confirmed,
             "email": email, "phone": phone, "city": city,
+            "sbx_category": sbx_category,  # SBX's native role label
         })
 
     text = collapse_ws(strip_tags(html))
@@ -612,7 +655,9 @@ def main():
         }
         detail_rows.append(detail_row)
 
-        # Merge plan holders from detail page + separate planholder page
+        # Merge plan holders from detail page + separate planholder page.
+        # Carry sbx_category through so the role classifier can defer to
+        # SBX's native label when available.
         all_holders = list(holders)
         detail_phs = parsed.get("plan_holders") or []
         seen_ph_names = {normalize_gc(h["name"]) for h in all_holders}
@@ -624,17 +669,28 @@ def main():
                     "contact_phone": ph.get("phone"),
                     "contact_email": ph.get("email"),
                     "city": ph.get("city"),
-                    "role": "GC",
+                    "sbx_category": ph.get("sbx_category"),  # SBX-native label
+                    # Role gets resolved below — sbx_category wins if present.
+                    "role": None,
                     "doc_count": 0,
                 })
                 seen_ph_names.add(nm)
         if detail_phs:
-            print(f"  +{len(detail_phs)} GCs from detail page ({len(all_holders)} total)")
+            print(f"  +{len(detail_phs)} from detail page ({len(all_holders)} total)")
 
         for h in all_holders:
             nm_norm = normalize_gc(h["name"])
             if not nm_norm:
                 continue
+            # Prefer SBX's native category over our AI classifier --
+            # SBX already groups bidders by trade (General Contractor,
+            # Electrical, Equipment, Fencing, SecuritySystems, Surveying,
+            # Business / Support Services, Consultant, etc.) and that's
+            # more authoritative than name-based heuristics. Only fall
+            # back to plan_holder_classifier when no SBX category came
+            # through (planholder-page-sourced rows don't carry one).
+            sbx_cat = (h.get("sbx_category") or "").strip()
+            role = sbx_cat if sbx_cat else classify_role(h["name"])
             holder_rows.append({
                 "id":                  f"{plannum}::{nm_norm}",
                 "opsplannum":          plannum,
@@ -644,7 +700,7 @@ def main():
                 "contact_phone":       h.get("contact_phone"),
                 "contact_email":       h.get("contact_email"),
                 "city":                h.get("city"),
-                "role":                h.get("role"),
+                "role":                role,
                 "doc_count":           h.get("doc_count") or 0,
                 "status":              "active",
                 "last_seen_at":        now_iso,
