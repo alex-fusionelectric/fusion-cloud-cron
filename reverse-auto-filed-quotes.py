@@ -43,6 +43,7 @@ SUPABASE_URL = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 TABLE        = "quote_files_cloud"
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 DRY_RUN      = (os.environ.get("DRY_RUN") or "").strip() == "1"
+EST_FILTER   = (os.environ.get("EST_NUMBER_FILTER") or "").strip()  # empty = all bids
 
 
 # --- Supabase --------------------------------------------------------------
@@ -147,13 +148,17 @@ def remove_label_from_thread(svc, thread_id: str, label_id: str) -> bool:
 # --- Main ------------------------------------------------------------------
 
 def main():
-    print(f"=== reverse-auto-filed-quotes starting (DRY_RUN={DRY_RUN}) ===")
-    # 1. Pull every row in quote_files_cloud
-    st, body = _sb("GET", f"{TABLE}?select=*&order=filed_at.asc&limit=10000")
+    print(f"=== reverse-auto-filed-quotes starting (DRY_RUN={DRY_RUN}, EST_FILTER={EST_FILTER or '(all)'}) ===")
+    # 1. Pull rows in quote_files_cloud, optionally filtered to a single EST#
+    qs = f"{TABLE}?select=*&order=filed_at.asc&limit=10000"
+    if EST_FILTER:
+        qs += f"&est_number=eq.{urllib.parse.quote(EST_FILTER)}"
+    st, body = _sb("GET", qs)
     if st != 200:
         raise SystemExit(f"quote_files_cloud GET failed: HTTP {st}: {body[:200]}")
     rows = json.loads(body)
-    print(f"  {len(rows)} row(s) to reverse")
+    print(f"  {len(rows)} row(s) to reverse"
+          + (f" (filtered to EST# {EST_FILTER})" if EST_FILTER else ""))
     if not rows:
         print("  nothing to do.")
         return

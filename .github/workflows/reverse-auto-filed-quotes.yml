@@ -15,6 +15,10 @@ on:
         description: "Dry run (no deletes) — set to 'no' to actually delete"
         required: true
         default: "yes"
+      est_number:
+        description: "Only reverse files filed under this EST# (e.g. 26-243). Leave blank for ALL bids."
+        required: false
+        default: ""
 
 jobs:
   reverse:
@@ -35,4 +39,5 @@ jobs:
           DROPBOX_APP_KEY:       ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET:    ${{ secrets.DROPBOX_APP_SECRET }}
           DRY_RUN: ${{ github.event.inputs.dry_run == 'yes' && '1' || '0' }}
+          EST_NUMBER_FILTER: ${{ github.event.inputs.est_number }}
         run: python reverse-auto-filed-quotes.py
