@@ -563,7 +563,36 @@ def main():
             r"VA|MA|MD|MI|MN|NV|HI|AK|IN|WI|MO|TN|AL|SC|KY|OK|AR|IA|"
             r"KS|MS|NE|SD|ND|VT|NH|ME|DE|RI|WV|DC)\b"
         )
-        if _loc and _OUT_OF_STATE.search(_loc) and "CA" not in _loc and "CALIFORNIA" not in _loc:
+        # Whitelist: Claude occasionally hallucinates a non-CA state code
+        # next to a clearly-CA city ("San Francisco, VA"). If the location
+        # contains any of these CA cities, override the out-of-state guard.
+        _CA_CITIES = (
+            "SAN FRANCISCO", "OAKLAND", "SAN JOSE", "SACRAMENTO", "FREMONT",
+            "BERKELEY", "PALO ALTO", "REDWOOD CITY", "MOUNTAIN VIEW", "HAYWARD",
+            "SAN MATEO", "SAN RAFAEL", "SAN BRUNO", "SAN LEANDRO", "DALY CITY",
+            "SOUTH SAN FRANCISCO", "SANTA CLARA", "SUNNYVALE", "MILPITAS",
+            "GILROY", "MORGAN HILL", "PLEASANTON", "DUBLIN", "LIVERMORE",
+            "ANTIOCH", "CONCORD", "WALNUT CREEK", "MARTINEZ", "PITTSBURG",
+            "BRENTWOOD", "TRACY", "MANTECA", "MODESTO", "STOCKTON", "FRESNO",
+            "BAKERSFIELD", "LOS ANGELES", "LONG BEACH", "PASADENA", "BURBANK",
+            "GLENDALE", "SAN DIEGO", "ANAHEIM", "SANTA ANA", "IRVINE",
+            "RIVERSIDE", "SAN BERNARDINO", "SANTA ROSA", "NAPA", "VALLEJO",
+            "FAIRFIELD", "VACAVILLE", "DAVIS", "WOODLAND", "REDDING", "CHICO",
+            "MONTEREY", "SALINAS", "SANTA CRUZ", "WATSONVILLE",
+            "RANCHO CORDOVA", "ELK GROVE", "ROSEVILLE", "ROCKLIN", "FOLSOM",
+            "CITRUS HEIGHTS", "MERCED", "TURLOCK", "VISALIA",
+            "OCEANSIDE", "CARLSBAD", "ESCONDIDO", "CHULA VISTA",
+            "TURLOCK", "CUPERTINO", "LOS GATOS", "CAMPBELL", "SARATOGA",
+            "NEWARK", "UNION CITY", "RICHMOND", "EL CERRITO", "SAN RAMON",
+            "DANVILLE", "ORINDA", "LAFAYETTE", "MORAGA", "ALAMEDA",
+            "EMERYVILLE", "PIEDMONT", "ALBANY", "PINOLE", "HERCULES",
+        )
+        _ca_explicit = (
+            "CA" in _loc.split()  # word-boundary match for "CA"
+            or "CALIFORNIA" in _loc
+            or any(c in _loc for c in _CA_CITIES)
+        )
+        if _loc and _OUT_OF_STATE.search(_loc) and not _ca_explicit:
             print(f"  [skip] out-of-state location: {ext.get('location')!r}")
             continue
 
@@ -606,6 +635,9 @@ def main():
             )
 
         stable_id = hashlib.sha1(m["id"].encode("utf-8")).hexdigest()[:24]
+        # Always include every column so PostgREST batch upsert sees a
+        # uniform shape (it returns PGRST102 "All object keys must match"
+        # otherwise). New optional cols default to null / 0 / [].
         row = {
             "id":              stable_id,
             "thread_id":       m.get("threadId"),
@@ -626,18 +658,16 @@ def main():
             "received_at":     received_iso,
             "generated_at":    dt.datetime.utcnow().isoformat() + "Z",
             "updated_at":      dt.datetime.utcnow().isoformat() + "Z",
+            # Forwarded-message + addenda metadata. Always included (nullable)
+            # to keep the batch shape uniform. Columns added by
+            # fusion-bid-list/sql/bid_invitations_forward_addenda_cols.sql;
+            # upsert_invitations() retries without these if the migration
+            # hasn't been run.
+            "forwarded_by":         (forwarded_by or "")[:300] or None,
+            "original_sender_name": (ext.get("original_sender_name") or "")[:200] or None,
+            "addenda_count":        int(ext.get("addenda_count") or 0),
+            "addenda_numbers":      ext.get("addenda_numbers") or [],
         }
-        # Optional columns added by add-bid-invitations-forward-cols.sql.
-        # We populate them only when present so the cron still writes if
-        # the migration hasn't been run yet (the upsert will retry without
-        # the optional fields on a 400).
-        if forwarded_by:
-            row["forwarded_by"] = forwarded_by[:300]
-            if ext.get("original_sender_name"):
-                row["original_sender_name"] = ext["original_sender_name"][:200]
-        if ext.get("addenda_count"):
-            row["addenda_count"] = ext["addenda_count"]
-            row["addenda_numbers"] = ext.get("addenda_numbers") or []
         rows.append(row)
 
     print(f"\nClassified {classified} new (cache misses), {skipped} skipped (LLM failures).")
