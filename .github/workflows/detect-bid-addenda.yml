@@ -37,5 +37,9 @@ jobs:
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-          ALERT_TO_EMAIL: alex@fusionelectric-inc.com
+          # ALERT_TO_EMAIL intentionally NOT set so detect-bid-addenda.py
+          # reads recipients from email_policies_cloud.addenda_alert
+          # (Alex + Gabriel by default). Setting this env var overrides
+          # the policy table — leave it unset unless you need an
+          # emergency redirect (e.g. Supabase outage).
         run: python detect-bid-addenda.py
