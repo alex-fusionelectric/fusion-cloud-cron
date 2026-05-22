@@ -1,0 +1,38 @@
+name: Reverse auto-filed vendor quotes (manual)
+
+# One-shot UNDO of the auto-file-vendor-quotes cron. Walks every row in
+# quote_files_cloud, deletes the corresponding file from Dropbox, removes
+# the AUTO-FILED label from the source Gmail thread, then deletes the
+# audit row. Used to restore the EST# 26-239 and EST# 26-243 QUOTES
+# folders after the cron filed ~192 junk attachments on 5/22/2026.
+#
+# Manual dispatch only -- never schedule.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no deletes) — set to 'no' to actually delete"
+        required: true
+        default: "yes"
+
+jobs:
+  reverse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Reverse filed quotes
+        env:
+          SUPABASE_SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GMAIL_TOKEN_JSON:      ${{ secrets.GMAIL_TOKEN_JSON }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          DROPBOX_APP_KEY:       ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET:    ${{ secrets.DROPBOX_APP_SECRET }}
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'yes' && '1' || '0' }}
+        run: python reverse-auto-filed-quotes.py
