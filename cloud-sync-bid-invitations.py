@@ -538,11 +538,25 @@ def main():
     rows = []
     classified = 0
     skipped = 0
+    fetch_404 = 0
+    fetch_other_err = 0
     for i, m in enumerate(candidates, 1):
         ck = f"bidinv:{m['id']}"
         ext = cache.get(ck)
         if not ext or not isinstance(ext, dict) or "is_invitation" not in ext:
-            full = svc.users().messages().get(userId="me", id=m["id"], format="full").execute()
+            try:
+                full = svc.users().messages().get(userId="me", id=m["id"], format="full").execute()
+            except Exception as fetch_err:  # noqa: BLE001
+                # 404 = message deleted between list and get, or moved to a
+                # label the OAuth scope can't read. Skip it; don't abort the run.
+                msg = str(fetch_err)
+                if "404" in msg or "notFound" in msg:
+                    fetch_404 += 1
+                else:
+                    fetch_other_err += 1
+                    print(f"  [fetch-warn] {m['id']}: {msg[:200]}")
+                skipped += 1
+                continue
             headers = {h["name"].lower(): h["value"] for h in full.get("payload", {}).get("headers", [])}
             subject = headers.get("subject", "")
             sender = headers.get("from", "")
@@ -613,7 +627,15 @@ def main():
         # We need received_at for the table row. Fetch only if we used cache
         # (skipped the full Gmail get above).
         if "received_at" not in ext:
-            meta = svc.users().messages().get(userId="me", id=m["id"], format="metadata", metadataHeaders=["From","Subject","Date"]).execute()
+            try:
+                meta = svc.users().messages().get(userId="me", id=m["id"], format="metadata", metadataHeaders=["From","Subject","Date"]).execute()
+            except Exception as meta_err:  # noqa: BLE001
+                if "404" in str(meta_err) or "notFound" in str(meta_err):
+                    fetch_404 += 1
+                else:
+                    fetch_other_err += 1
+                    print(f"  [meta-fetch-warn] {m['id']}: {str(meta_err)[:200]}")
+                continue
             mh = {h["name"].lower(): h["value"] for h in meta.get("payload", {}).get("headers", [])}
             received_ms = int(meta.get("internalDate", 0))
             received_iso = dt.datetime.utcfromtimestamp(received_ms / 1000).isoformat() + "Z" if received_ms else None
@@ -674,7 +696,8 @@ def main():
         }
         rows.append(row)
 
-    print(f"\nClassified {classified} new (cache misses), {skipped} skipped (LLM failures).")
+    print(f"\nClassified {classified} new (cache misses), {skipped} skipped "
+          f"({fetch_404} fetch 404s, {fetch_other_err} other fetch errs, rest = LLM failures).")
     print(f"Future-dated invitations to upsert: {len(rows)}")
     n = upsert_invitations(rows)
     print(f"Wrote {n} row(s) to {INVITATIONS_TABLE}.")
