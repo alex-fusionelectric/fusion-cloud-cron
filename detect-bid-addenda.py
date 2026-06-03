@@ -257,7 +257,7 @@ def fetch_active_bids(gmail_svc=None, dbx=None) -> list[dict]:
 
     status_in = ",".join(urllib.parse.quote(s, safe="") for s in _ACTIVE_STATUS_VALUES)
     qs2 = (f"select=est_number,project_name,client_gc,project_engineer,"
-           f"bid_due_date,status,outcome"
+           f"bid_due_date,status,outcome,documents_url"
            f"&status=in.({status_in})&limit=600")
     st2, body2 = _sb("GET", f"bids_cloud?{qs2}")
     if st2 != 200:
@@ -288,6 +288,10 @@ def fetch_active_bids(gmail_svc=None, dbx=None) -> list[dict]:
             "client_gc": r.get("client_gc"),
             "project_engineer": r.get("project_engineer"),
             "bid_due_date": r.get("bid_due_date"),
+            # Plan-room URL drives the SBX-vs-other-portal guard in
+            # find_sbx_for_bid -- bids whose link isn't onlineplanservice.com
+            # are not eligible for fuzzy SBX matching.
+            "documents_url": r.get("documents_url"),
             "updated_at": None,
         })
         seen_ests.add(est)
@@ -371,6 +375,14 @@ def find_sbx_for_bid(bid: dict, sbx_by_id: dict, sbx_all: list[dict]) -> dict | 
                     return r
 
     # Strategy 2: fuzzy project_name match
+    # SBX URL guard: if the bid's documents_url is a non-SBX plan-room link
+    # (srco.cloud, planhub, buildingconnected, etc.), refuse to fuzzy-match.
+    # Without this, "CAL WATER MPS REBUILD" (files.srco.cloud) wrongly
+    # matched "Coyote Pump Plant Pump No. 4 Rebuild" (COPS26-00849) and
+    # the watcher pulled the wrong project's files.
+    docs_url = (bid.get("documents_url") or "").strip().lower()
+    if docs_url and "onlineplanservice.com" not in docs_url:
+        return None
     bid_pn = bid.get("project_name") or ""
     bid_toks = _sig_tokens(bid_pn)
     if len(bid_toks) < 2:
@@ -382,13 +394,29 @@ def find_sbx_for_bid(bid: dict, sbx_by_id: dict, sbx_all: list[dict]) -> dict | 
         if len(sbx_toks) < 2:
             continue
         common = bid_toks & sbx_toks
-        if len(common) >= 2:
-            ratio_a = len(common) / max(len(bid_toks), 1)
-            ratio_b = len(common) / max(len(sbx_toks), 1)
-            if ratio_a >= 0.6 or ratio_b >= 0.6:
-                if len(common) > best_common:
-                    best = r
-                    best_common = len(common)
+        if len(common) < 2:
+            continue
+        ratio_a = len(common) / max(len(bid_toks), 1)
+        ratio_b = len(common) / max(len(sbx_toks), 1)
+        # Symmetric overlap: BOTH directions must pass 0.5.
+        if ratio_a < 0.5 or ratio_b < 0.5:
+            continue
+        # Confidence: 3+ common OR 2+ common with a distinctive long token
+        # (>=7 chars) in the overlap. See project_setup_bid_fuzzy_matcher.
+        has_distinctive = any(len(t) >= 7 for t in common)
+        if len(common) < 3 and not has_distinctive:
+            continue
+        if len(common) > best_common:
+            best = r
+            best_common = len(common)
+    # Final guard: if matched but bid.documents_url points to a different
+    # opsplannum, refuse. Prevents same-token mismatches even when the
+    # bid IS hosted on SBX.
+    if best and docs_url:
+        opn = (best.get("opsplannum") or "").strip().lower()
+        short = opn.replace("cops", "")
+        if opn and opn not in docs_url and short not in docs_url:
+            return None
     return best
 
 

@@ -143,17 +143,35 @@ def rename_label(svc, label_id: str, new_name: str) -> tuple[bool, str]:
         ).execute()
         return True, "renamed"
     except HttpError as e:
-        # 409: a label with that name already exists (the duplicate case)
+        return False, f"HTTP {e.resp.status}: {str(e)[:120]}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:120]}"
+
+
+def delete_label(svc, label_id: str) -> tuple[bool, str]:
+    """Delete a Gmail label entirely. Threads keep all OTHER labels they had;
+    this just removes the targeted one from every thread it touched."""
+    try:
+        svc.users().labels().delete(userId="me", id=label_id).execute()
+        return True, "deleted"
+    except HttpError as e:
         return False, f"HTTP {e.resp.status}: {str(e)[:120]}"
     except Exception as e:
         return False, f"{type(e).__name__}: {str(e)[:120]}"
 
 
 def sync_labels(svc, bid_statuses: dict[str, str], all_labels: list[dict]) -> int:
-    """For each managed label, ensure it sits in the correct folder per
-    the bid's BID LIST status. Renames in place when wrong; logs [dupe]
-    when both folders already have a label for the same EST#."""
-    # Build {est_number: {folder: label}} so we can spot duplicates
+    """For each managed label, ensure it sits in the correct folder per the
+    bid's BID LIST status. Strategy:
+
+      * Single label in the right folder -> leave alone.
+      * Single label in the wrong folder -> rename in place (labels.patch
+        preserves labelId so threads keep their tag).
+      * Both CURRENT and SENT labels exist for the same EST# -> the wrong-
+        side label is spurious. Alex 2026-06-03 said "make sure that doesn't
+        happen" -- we DELETE the wrong-side label entirely (every hour) so
+        the duplicate state heals itself even if we can't find the creator.
+    """
     by_est: dict[str, dict[str, dict]] = {}
     for L in all_labels:
         parsed = _parse_label(L.get("name") or "")
@@ -167,51 +185,67 @@ def sync_labels(svc, bid_statuses: dict[str, str], all_labels: list[dict]) -> in
         }
 
     renames = 0
-    dupes = 0
+    deletes = 0
     skipped_unknown_status = 0
 
     for est, entries in sorted(by_est.items()):
         status = bid_statuses.get(est)
+        has_current = CURRENT_BIDS_FOLDER in entries
+        has_sent    = SENT_BIDS_FOLDER    in entries
 
-        # Both folders have a label for this EST# -> duplicate. Leave alone
-        # per Alex's "fix going forward" preference; just surface in logs.
-        if len(entries) == 2:
-            dupes += 1
-            cur = entries[CURRENT_BIDS_FOLDER]
-            sent = entries[SENT_BIDS_FOLDER]
-            print(f"  [dupe] {est}: status={status} -- both CURRENT and SENT labels exist "
-                  f"(current={cur['id']} '{cur['leaf']}', sent={sent['id']} '{sent['leaf']}')")
-            continue
-
-        # Exactly one label exists. Decide if it's in the right folder.
         if not status:
-            # No BID LIST row found -- could be SAC, archived, or just not synced yet
             skipped_unknown_status += 1
             continue
 
+        # Decide the correct folder for this bid's current status.
         if status in CURRENT_STATUSES:
-            wrong_entry = entries.get(SENT_BIDS_FOLDER)
-            if wrong_entry:
-                new_name = f"{CURRENT_BIDS_FOLDER}/{wrong_entry['leaf']}"
-                ok, msg = rename_label(svc, wrong_entry["id"], new_name)
-                if ok:
-                    print(f"  [move] {est}: SENT -> CURRENT ({wrong_entry['leaf']}) "
-                          f"label={wrong_entry['id']}")
-                    renames += 1
-                else:
-                    print(f"  [warn] {est}: rename SENT->CURRENT failed: {msg}")
+            correct_folder = CURRENT_BIDS_FOLDER
         elif status in SENT_STATUSES:
-            wrong_entry = entries.get(CURRENT_BIDS_FOLDER)
-            if wrong_entry:
-                new_name = f"{SENT_BIDS_FOLDER}/{wrong_entry['leaf']}"
-                ok, msg = rename_label(svc, wrong_entry["id"], new_name)
-                if ok:
-                    print(f"  [move] {est}: CURRENT -> SENT ({wrong_entry['leaf']}) "
-                          f"label={wrong_entry['id']}")
-                    renames += 1
-                else:
-                    print(f"  [warn] {est}: rename CURRENT->SENT failed: {msg}")
-        # Any other status (ARCHIVED, blank, etc.) -- leave alone.
+            correct_folder = SENT_BIDS_FOLDER
+        else:
+            # ARCHIVED / blank / unknown -- don't touch.
+            continue
+
+        wrong_folder = (SENT_BIDS_FOLDER if correct_folder == CURRENT_BIDS_FOLDER
+                                          else CURRENT_BIDS_FOLDER)
+
+        # Case 1: both labels exist. DELETE the wrong-side one.
+        if has_current and has_sent:
+            wrong = entries[wrong_folder]
+            ok, msg = delete_label(svc, wrong["id"])
+            if ok:
+                print(f"  [delete-dupe] {est}: status={status} -- deleted "
+                      f"spurious {wrong_folder} label "
+                      f"(id={wrong['id']} '{wrong['leaf']}')")
+                deletes += 1
+            else:
+                print(f"  [warn] {est}: delete dupe {wrong['id']} failed: {msg}")
+            continue
+
+        # Case 2: only the wrong-folder label exists. Rename it in place
+        # (preserves labelId, keeps thread associations).
+        if wrong_folder in entries:
+            wrong = entries[wrong_folder]
+            new_name = f"{correct_folder}/{wrong['leaf']}"
+            ok, msg = rename_label(svc, wrong["id"], new_name)
+            if ok:
+                direction = (
+                    "SENT -> CURRENT" if correct_folder == CURRENT_BIDS_FOLDER
+                    else "CURRENT -> SENT"
+                )
+                print(f"  [move] {est}: {direction} ({wrong['leaf']}) "
+                      f"label={wrong['id']}")
+                renames += 1
+            else:
+                print(f"  [warn] {est}: rename {wrong['id']} -> {new_name} "
+                      f"failed: {msg}")
+            continue
+
+        # Case 3: only the correct-folder label exists -> nothing to do.
+
+    print(f"  summary: {renames} renamed, {deletes} dupes deleted, "
+          f"{skipped_unknown_status} skipped (no BID LIST status)")
+    return renames + deletes
 
     print(f"  summary: {renames} renamed, {dupes} duplicates flagged, "
           f"{skipped_unknown_status} skipped (no BID LIST status)")
