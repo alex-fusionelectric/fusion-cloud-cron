@@ -29,9 +29,20 @@ except ImportError as e:
 
 SUPABASE_URL  = "https://dltuvsdwrujjsmiotaxy.supabase.co"
 SCOPES        = ["https://www.googleapis.com/auth/gmail.modify"]
-ROOT_LABEL    = "ESTIMATING/CURRENT BIDS"
+CURRENT_ROOT  = "ESTIMATING/CURRENT BIDS"
+SENT_ROOT     = "ESTIMATING/SENT BIDS"
+ROOT_LABEL    = CURRENT_ROOT  # back-compat alias
 ACTIVE_STATUS = {"BIDDING", "BID OR BAIL", "SENT", "FOLLOW UP", "FOLLOW UPS", "PENDING"}
-EST_LABEL_RX  = re.compile(r"^ESTIMATING/CURRENT BIDS/(\d{2}-\d{3,4})\b", re.IGNORECASE)
+# Which folder each status belongs in. Used to decide where a brand-new label
+# goes, so we NEVER recreate a CURRENT label for a bid that has already
+# (correctly) moved to SENT -- that recreation was the duplicate-label bug.
+CURRENT_STATUSES = {"BIDDING", "BID OR BAIL", "PENDING"}
+SENT_STATUSES    = {"SENT", "FOLLOW UP", "FOLLOW UPS"}
+# Match an EST# label in EITHER folder. Counting a SENT label as "already
+# exists" is what stops the duplicate-label churn with the relabeler: once a
+# bid's label has been renamed into SENT BIDS, this job sees it and leaves it
+# alone instead of forging a fresh CURRENT BIDS copy.
+EST_LABEL_RX  = re.compile(r"^ESTIMATING/(?:CURRENT|SENT) BIDS/(\d{2}-\d{3,4})\b", re.IGNORECASE)
 
 
 def _service_key() -> str:
@@ -69,7 +80,10 @@ def gmail_service():
 
 
 def get_existing_est_labels(svc) -> dict[str, str]:
-    """Return {est_number: label_name} for all existing ESTIMATING/CURRENT BIDS/* labels."""
+    """Return {est_number: label_name} for every EST# label, whether it lives
+    under ESTIMATING/CURRENT BIDS/* or ESTIMATING/SENT BIDS/*. Scanning both
+    folders means a bid that has moved to SENT still counts as 'has a label',
+    so we don't recreate a duplicate in CURRENT."""
     result = svc.users().labels().list(userId="me").execute()
     out = {}
     for L in result.get("labels", []) or []:
@@ -129,8 +143,12 @@ def main() -> int:
         if est in existing:
             label_name = existing[est]
         else:
-            # Label missing — create it
-            label_name = f"{ROOT_LABEL}/{est} {name}"
+            # No label in EITHER folder -- create one in the folder that
+            # matches this bid's status. A sent bid gets a SENT BIDS label,
+            # NOT a CURRENT one (recreating CURRENT was the duplicate bug).
+            status = (bid.get("status") or "").strip().upper()
+            root = SENT_ROOT if status in SENT_STATUSES else CURRENT_ROOT
+            label_name = f"{root}/{est} {name}"
             print(f"  + creating label: {label_name}")
             try:
                 create_label(svc, label_name)

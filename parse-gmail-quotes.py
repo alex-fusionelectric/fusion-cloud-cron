@@ -71,7 +71,7 @@ LLM_CACHE_PATH = SCRIPTS_DIR / "gmail-llm-cache.json"
 # billing wall, to avoid sending an alert every 15 minutes when the auto-
 # update task hits the same error in a loop.
 CREDIT_ALERT_STATE_PATH = SCRIPTS_DIR / "credit-alert-state.json"
-CREDIT_ALERT_COOLDOWN_HOURS = 12
+CREDIT_ALERT_COOLDOWN_HOURS = 24
 CREDIT_ALERT_TO = "alex@fusionelectric-inc.com"
 
 # Claude config. This parser does structured extraction (JSON shape with
@@ -1226,7 +1226,34 @@ def is_credit_or_billing_error(exc):
     return any(n in text for n in needles)
 
 
+def _credit_alert_kv_url():
+    """Cloud mode (SUPABASE_SERVICE_KEY set): PostgREST URL for the
+    gmail_kv_cloud row holding the credit-alert cooldown timestamp. GitHub
+    Actions runners are stateless, so a local file resets every run and the
+    cooldown never holds -- persisting it in Supabase keeps the 24h limit
+    real across runs. Returns None on PC mode (local file is used)."""
+    if not os.environ.get("SUPABASE_SERVICE_KEY"):
+        return None
+    return "https://dltuvsdwrujjsmiotaxy.supabase.co/rest/v1/gmail_kv_cloud"
+
+
 def _load_credit_alert_state():
+    cloud_url = _credit_alert_kv_url()
+    if cloud_url:
+        import urllib.request as _ur
+        key = os.environ["SUPABASE_SERVICE_KEY"]
+        try:
+            req = _ur.Request(
+                cloud_url + "?key=eq.credit_alert_state&select=value",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            )
+            with _ur.urlopen(req, timeout=20) as resp:
+                rows = json.loads(resp.read().decode("utf-8") or "[]")
+                if rows and isinstance(rows[0].get("value"), dict):
+                    return rows[0]["value"]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] cloud credit-alert state read failed: {exc}", file=sys.stderr)
+        return {}
     if not CREDIT_ALERT_STATE_PATH.is_file():
         return {}
     try:
@@ -1236,6 +1263,33 @@ def _load_credit_alert_state():
 
 
 def _save_credit_alert_state(state):
+    cloud_url = _credit_alert_kv_url()
+    if cloud_url:
+        import urllib.request as _ur
+        key = os.environ["SUPABASE_SERVICE_KEY"]
+        body = json.dumps([{
+            "key": "credit_alert_state",
+            "value": state,
+            "updated_at": dt.datetime.utcnow().isoformat() + "Z",
+        }]).encode("utf-8")
+        try:
+            req = _ur.Request(
+                cloud_url,
+                data=body,
+                method="POST",
+                headers={
+                    "apikey": key,
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates,return=minimal",
+                },
+            )
+            with _ur.urlopen(req, timeout=30) as resp:
+                if resp.status not in (200, 201, 204):
+                    print(f"[warn] cloud credit-alert state write returned HTTP {resp.status}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] cloud credit-alert state write failed: {exc}", file=sys.stderr)
+        return
     try:
         CREDIT_ALERT_STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
     except Exception:  # noqa: BLE001
