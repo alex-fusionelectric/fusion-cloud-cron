@@ -180,15 +180,27 @@ def main() -> int:
     # is a potential GC — write to sbx_plan_holders_cloud so the card shows them.
     gc_rows = []
     FUSION_DOMAIN = "fusionelectric-inc.com"
+    # One labels.list call, reused for every label below. The old code called
+    # labels.list once PER label inside the loop -- with 100+ EST labels that
+    # was thousands of API calls and blew past the workflow timeout, so the
+    # job got cancelled every run.
+    label_ids = {L.get("name"): L["id"]
+                 for L in svc.users().labels().list(userId="me").execute().get("labels", []) or []}
     for est, label_name in existing.items():
         if not label_name:
+            continue
+        # Only scan CURRENT BIDS labels for GC contacts -- SENT bids are done;
+        # scanning them too doubles the runtime for no benefit.
+        if not label_name.startswith(f"{CURRENT_ROOT}/"):
+            continue
+        label_id = label_ids.get(label_name)
+        if not label_id:
             continue
         try:
             # Get up to 20 thread senders from this label
             threads_resp = svc.users().threads().list(
                 userId="me",
-                labelIds=[next((L["id"] for L in svc.users().labels().list(userId="me").execute().get("labels",[])
-                                if L.get("name") == label_name), "")],
+                labelIds=[label_id],
                 maxResults=20
             ).execute()
             for t in threads_resp.get("threads", []) or []:
